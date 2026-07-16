@@ -1,4 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { logger } from '@/ui/logger';
 import { killProcessByChildProcess } from '@/utils/process';
 import type {
@@ -69,8 +72,47 @@ function createAbortError(): Error {
     return error;
 }
 
+function configArgsForProfile(profile: string | undefined): string[] {
+    if (!profile) return [];
+
+    const codexHome = process.env.CODEX_HOME || join(homedir(), '.codex');
+    const profilePath = join(codexHome, `${profile}.config.toml`);
+    if (!existsSync(profilePath)) {
+        logger.debug(`[CodexAppServer] Profile config not found: ${profilePath}`);
+        return [];
+    }
+
+    const args: string[] = [];
+    let section = '';
+    for (const rawLine of readFileSync(profilePath, 'utf8').split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+
+        const sectionMatch = line.match(/^\[([^\]]+)\]$/);
+        if (sectionMatch) {
+            section = sectionMatch[1].trim();
+            continue;
+        }
+
+        const assignment = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
+        if (!assignment) continue;
+
+        const key = section ? `${section}.${assignment[1]}` : assignment[1];
+        const value = assignment[2].trim();
+        args.push('-c', `${key}=${value}`);
+    }
+
+    logger.debug(`[CodexAppServer] Applying Codex profile ${profile} from ${profilePath}`);
+    return args;
+}
+
 export class CodexAppServerClient {
     private process: ChildProcessWithoutNullStreams | null = null;
+
+    constructor(
+        private readonly codexProfile?: string,
+        private readonly codexProvider?: string
+    ) {}
     private connected = false;
     private buffer = '';
     private nextId = 1;
@@ -91,7 +133,12 @@ export class CodexAppServerClient {
             return;
         }
 
-        this.process = spawn('codex', ['app-server'], {
+        const args = [
+            'app-server',
+            ...configArgsForProfile(this.codexProfile),
+            ...(this.codexProvider ? ['-c', `model_provider=${JSON.stringify(this.codexProvider)}`] : [])
+        ];
+        this.process = spawn('codex', args, {
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];
                 if (typeof value === 'string') acc[key] = value;

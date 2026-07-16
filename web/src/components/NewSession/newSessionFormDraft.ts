@@ -9,6 +9,7 @@ export type NewSessionFormDraft = {
     machineId: string | null
     effort: ClaudeEffort
     modelReasoningEffort: CodexReasoningEffort
+    codexProvider?: string
     yoloMode: boolean
     sessionType: SessionType
     worktreeName: string
@@ -39,6 +40,7 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
             machineId: typeof parsed.machineId === 'string' ? parsed.machineId : null,
             effort: (parsed.effort as ClaudeEffort | undefined) ?? 'auto',
             modelReasoningEffort: (parsed.modelReasoningEffort as CodexReasoningEffort | undefined) ?? 'default',
+            codexProvider: typeof parsed.codexProvider === 'string' ? parsed.codexProvider : '',
             yoloMode: Boolean(parsed.yoloMode),
             sessionType: (parsed.sessionType as SessionType | undefined) ?? 'simple',
             worktreeName: typeof parsed.worktreeName === 'string' ? parsed.worktreeName : ''

@@ -71,6 +71,24 @@ describe('buildCliArgs', () => {
         expect(args).toContain('high')
     })
 
+    it('passes Codex profile through as -p', () => {
+        const args = buildCliArgs('codex', {
+            directory: '/tmp',
+            codexProfile: 'glm',
+        })
+        expect(args).toContain('-p')
+        expect(args).toContain('glm')
+    })
+
+    it('does not pass Codex profile through for non-Codex agents', () => {
+        const args = buildCliArgs('claude', {
+            directory: '/tmp',
+            codexProfile: 'glm',
+        })
+        expect(args).not.toContain('-p')
+        expect(args).not.toContain('glm')
+    })
+
     it('validates all known permission modes', () => {
         for (const mode of ['default', 'acceptEdits', 'bypassPermissions', 'plan', 'ask', 'read-only', 'safe-yolo', 'yolo']) {
             const args = buildCliArgs('claude', {

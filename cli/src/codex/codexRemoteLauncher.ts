@@ -189,7 +189,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     constructor(session: CodexSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
-        this.appServerClient = new CodexAppServerClient();
+        this.appServerClient = new CodexAppServerClient(session.codexProfile, session.codexProvider);
     }
 
     protected createDisplay(context: RemoteLauncherDisplayContext): React.ReactElement {

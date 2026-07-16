@@ -1122,6 +1122,12 @@ export function buildCliArgs(
   if (options.modelReasoningEffort && (agent === 'codex' || agent === 'opencode')) {
     args.push('--model-reasoning-effort', options.modelReasoningEffort);
   }
+  if (options.codexProfile && agent === 'codex') {
+    args.push('-p', options.codexProfile);
+  }
+  if (options.codexProvider && agent === 'codex') {
+    args.push('--codex-provider', options.codexProvider);
+  }
   if (options.permissionMode && (PERMISSION_MODES as readonly string[]).includes(options.permissionMode)) {
     args.push('--permission-mode', options.permissionMode);
   } else if (yolo) {

@@ -112,6 +112,8 @@ export class RpcGateway {
         agent: AgentFlavor = 'claude',
         model?: string,
         modelReasoningEffort?: string,
+        codexProfile?: string,
+        codexProvider?: string,
         yolo?: boolean,
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
@@ -123,7 +125,7 @@ export class RpcGateway {
             const result = await this.machineRpc(
                 machineId,
                 RPC_METHODS.SpawnHappySession,
-                { type: 'spawn-in-directory', directory, agent, model, modelReasoningEffort, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode }
+                { type: 'spawn-in-directory', directory, agent, model, modelReasoningEffort, codexProfile, codexProvider, yolo, sessionType, worktreeName, resumeSessionId, effort, permissionMode }
             )
             if (result && typeof result === 'object') {
                 const obj = result as Record<string, unknown>

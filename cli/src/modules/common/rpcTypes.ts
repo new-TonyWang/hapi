@@ -10,6 +10,8 @@ export interface SpawnSessionOptions {
     model?: string
     effort?: string
     modelReasoningEffort?: string
+    codexProfile?: string
+    codexProvider?: string
     yolo?: boolean
     permissionMode?: string
     token?: string

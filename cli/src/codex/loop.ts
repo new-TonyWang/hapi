@@ -27,6 +27,8 @@ interface LoopOptions {
     session: ApiSessionClient;
     api: ApiClient;
     codexArgs?: string[];
+    codexProfile?: string;
+    codexProvider?: string;
     codexCliOverrides?: CodexCliOverrides;
     permissionMode?: PermissionMode;
     model?: string;
@@ -53,6 +55,8 @@ export async function loop(opts: LoopOptions): Promise<void> {
         startedBy,
         startingMode,
         codexArgs: opts.codexArgs,
+        codexProfile: opts.codexProfile,
+        codexProvider: opts.codexProvider,
         codexCliOverrides: opts.codexCliOverrides,
         permissionMode: opts.permissionMode ?? 'default',
         model: opts.model,

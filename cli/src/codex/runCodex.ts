@@ -31,6 +31,8 @@ export async function runCodex(opts: {
     resumeSessionId?: string;
     model?: string;
     modelReasoningEffort?: ReasoningEffort;
+    codexProfile?: string;
+    codexProvider?: string;
     collaborationMode?: EnhancedMode['collaborationMode'];
     existingSessionId?: string;
     workingDirectory?: string;
@@ -349,6 +351,8 @@ export async function runCodex(opts: {
             api,
             session,
             codexArgs: opts.codexArgs,
+            codexProfile: opts.codexProfile,
+            codexProvider: opts.codexProvider,
             codexCliOverrides,
             startedBy,
             permissionMode: currentPermissionMode,

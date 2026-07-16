@@ -11,6 +11,7 @@ type SpawnInput = {
     model?: string
     effort?: string
     modelReasoningEffort?: string
+    codexProvider?: string
     yolo?: boolean
     sessionType?: 'simple' | 'worktree'
     worktreeName?: string
@@ -34,6 +35,7 @@ export function useSpawnSession(api: ApiClient | null): {
                 input.agent,
                 input.model,
                 input.modelReasoningEffort,
+                input.codexProvider,
                 input.yolo,
                 input.sessionType,
                 input.worktreeName,

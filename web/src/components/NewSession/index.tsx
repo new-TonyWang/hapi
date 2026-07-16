@@ -76,6 +76,7 @@ export function NewSession(props: {
     const pendingCursorBaseRef = useRef<string | null>(null)
     const [effort, setEffort] = useState<ClaudeEffort>('auto')
     const [modelReasoningEffort, setModelReasoningEffort] = useState<CodexReasoningEffort>('default')
+    const [codexProvider, setCodexProvider] = useState('')
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
     const [sessionType, setSessionType] = useState<SessionType>('simple')
     const [worktreeName, setWorktreeName] = useState('')
@@ -92,6 +93,9 @@ export function NewSession(props: {
     useEffect(() => {
         setEffort('auto')
         setModelReasoningEffort('default')
+        if (agent !== 'codex') {
+            setCodexProvider('')
+        }
         if (agent !== 'cursor') {
             setModel('auto')
             setCursorSelectedBase('auto')
@@ -144,6 +148,7 @@ export function NewSession(props: {
         setCursorSelectedBase(draft.cursorSelectedBase)
         setEffort(draft.effort)
         setModelReasoningEffort(draft.modelReasoningEffort)
+        setCodexProvider(draft.codexProvider ?? '')
         setYoloMode(draft.yoloMode)
         setSessionType(draft.sessionType)
         setWorktreeName(draft.worktreeName)
@@ -454,6 +459,7 @@ export function NewSession(props: {
             machineId,
             effort,
             modelReasoningEffort,
+            codexProvider,
             yoloMode,
             sessionType,
             worktreeName
@@ -467,6 +473,7 @@ export function NewSession(props: {
         machineId,
         effort,
         modelReasoningEffort,
+        codexProvider,
         yoloMode,
         sessionType,
         worktreeName,
@@ -563,6 +570,9 @@ export function NewSession(props: {
             const resolvedModelReasoningEffort = (agent === 'codex' || agent === 'opencode') && modelReasoningEffort !== 'default'
                 ? modelReasoningEffort
                 : undefined
+            const resolvedCodexProvider = agent === 'codex' && codexProvider.trim()
+                ? codexProvider.trim()
+                : undefined
             const result = await spawnSession({
                 machineId,
                 directory: trimmedDirectory,
@@ -570,6 +580,7 @@ export function NewSession(props: {
                 model: resolvedModel,
                 effort: resolvedEffort,
                 modelReasoningEffort: resolvedModelReasoningEffort,
+                codexProvider: resolvedCodexProvider,
                 yolo: yoloMode,
                 sessionType,
                 worktreeName: sessionType === 'worktree' ? (worktreeName.trim() || undefined) : undefined
@@ -710,6 +721,30 @@ export function NewSession(props: {
                     />
                 )
             )}
+            {agent === 'codex' ? (
+                <div className="flex flex-col gap-1.5 px-3 py-3">
+                    <label className="text-xs font-medium text-[var(--app-hint)]">
+                        {t('newSession.codexProvider')}{' '}
+                        <span className="font-normal">({t('newSession.model.optional')})</span>
+                    </label>
+                    <input
+                        value={codexProvider}
+                        onChange={(e) => setCodexProvider(e.target.value)}
+                        disabled={isFormDisabled}
+                        placeholder={t('newSession.codexProvider.placeholder')}
+                        list="new-session-codex-provider-options"
+                        className="w-full px-3 py-2 text-sm rounded-lg border border-[var(--app-divider)] bg-[var(--app-bg)] text-[var(--app-text)] focus:outline-none focus:ring-2 focus:ring-[var(--app-link)] disabled:opacity-50"
+                    />
+                    <datalist id="new-session-codex-provider-options">
+                        <option value="Zhipu_Bigmodel" />
+                        <option value="bigmodel" />
+                        <option value="openai" />
+                    </datalist>
+                    <div className="text-xs text-[var(--app-hint)]">
+                        {t('newSession.codexProvider.help')}
+                    </div>
+                </div>
+            ) : null}
             <ClaudeEffortSelector
                 agent={agent}
                 effort={effort}
