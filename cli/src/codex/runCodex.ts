@@ -45,12 +45,17 @@ export async function runCodex(opts: {
     let state: AgentState = {
         controlledByUser: false
     };
+    const codexMetadataOverrides = {
+        ...(opts.codexProfile ? { codexProfile: opts.codexProfile } : {}),
+        ...(opts.codexProvider ? { codexProvider: opts.codexProvider } : {})
+    };
     const bootstrap = opts.existingSessionId
         ? await bootstrapExistingSession({
             sessionId: opts.existingSessionId,
             flavor: 'codex',
             startedBy,
-            workingDirectory
+            workingDirectory,
+            metadataOverrides: codexMetadataOverrides
         })
         : await bootstrapSession({
             flavor: 'codex',
@@ -58,7 +63,8 @@ export async function runCodex(opts: {
             workingDirectory,
             agentState: state,
             model: opts.model,
-            modelReasoningEffort: opts.modelReasoningEffort
+            modelReasoningEffort: opts.modelReasoningEffort,
+            metadataOverrides: codexMetadataOverrides
         });
     const { api, session } = bootstrap;
 

@@ -1134,14 +1134,20 @@ export class SyncEngine {
         const preferredPermissionMode = opts?.permissionMode
             ?? session.permissionMode
             ?? session.metadata?.preferredPermissionMode
+        const metadataRecord = (session.metadata ?? {}) as Record<string, unknown>
+        const storedCodexProfile = typeof metadataRecord.codexProfile === 'string' ? metadataRecord.codexProfile : undefined
+        const storedCodexProvider = typeof metadataRecord.codexProvider === 'string' ? metadataRecord.codexProvider : undefined
+        const derivedCodexProvider = flavor === 'codex' && !storedCodexProvider && session.model?.startsWith('glm-')
+            ? 'Zhipu_Bigmodel'
+            : storedCodexProvider
         const spawnResult = await this.rpcGateway.spawnSession(
             targetMachine.id,
             directory,
             flavor,
             session.model ?? undefined,
             session.modelReasoningEffort ?? undefined,
-            undefined,
-            undefined,
+            flavor === 'codex' ? storedCodexProfile : undefined,
+            flavor === 'codex' ? derivedCodexProvider : undefined,
             undefined,
             undefined,
             undefined,

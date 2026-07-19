@@ -61,6 +61,8 @@ export const MetadataSchema = z.object({
     archivedBy: z.string().optional(),
     archiveReason: z.string().optional(),
     preferredPermissionMode: PermissionModeSchema.optional(),
+    codexProfile: z.string().optional(),
+    codexProvider: z.string().optional(),
     flavor: z.string().nullish(),
     capabilities: SessionCapabilitiesSchema.optional(),
     worktree: WorktreeMetadataSchema.optional()
