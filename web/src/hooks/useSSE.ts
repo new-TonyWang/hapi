@@ -304,7 +304,8 @@ export function useSSE(options: {
                 const existing = existingIndex >= 0 ? previous.sessions[existingIndex] : undefined
                 const summary = {
                     ...toSessionSummary(session),
-                    futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0
+                    futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0,
+                    nextScheduledAt: existing?.nextScheduledAt ?? null
                 }
                 const nextSessions = previous.sessions.slice()
                 if (existingIndex >= 0) {
@@ -345,6 +346,9 @@ export function useSSE(options: {
                         ? patch.backgroundTaskCount ?? 0
                         : current.backgroundTaskCount,
                     model: Object.prototype.hasOwnProperty.call(patch, 'model') ? patch.model ?? null : current.model,
+                    modelReasoningEffort: Object.prototype.hasOwnProperty.call(patch, 'modelReasoningEffort')
+                        ? patch.modelReasoningEffort ?? null
+                        : current.modelReasoningEffort,
                     effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
                 }
 

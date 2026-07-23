@@ -4,6 +4,7 @@ export interface SpawnSessionOptions {
     machineId?: string
     directory: string
     sessionId?: string
+    existingSessionId?: string
     resumeSessionId?: string
     approvedNewDirectoryCreation?: boolean
     agent?: AgentFlavor
@@ -14,6 +15,7 @@ export interface SpawnSessionOptions {
     codexProvider?: string
     yolo?: boolean
     permissionMode?: string
+    serviceTier?: string
     token?: string
     sessionType?: 'simple' | 'worktree'
     worktreeName?: string

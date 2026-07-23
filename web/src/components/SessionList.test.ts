@@ -3,12 +3,17 @@ import type { SessionSummary } from '@/types/api'
 import {
     deduplicateSessionsByAgentId,
     expandSelectedSessionCollapseOverrides,
+    filterActiveSessionsOnly,
+    getSessionTimeRange,
+    getNextSessionVisibleCount,
     getSessionDedupKey,
+    getWorktreeSessionLabel,
     getVisibleSessionPreview,
     isSidebarEmptySessionStub,
     normalizeSearch,
     prepareSidebarSessions,
     sessionMatchesQuery,
+    sessionMatchesTimeRange,
     shouldShowSessionInSidebar
 } from './SessionList'
 
@@ -22,13 +27,60 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         todoProgress: null,
         pendingRequestsCount: 0,
         pendingRequestKinds: [],
+        pendingRequests: [],
         backgroundTaskCount: 0,
         futureScheduledMessageCount: 0,
+        nextScheduledAt: null,
         model: null,
         effort: null,
         ...overrides
     }
 }
+
+describe('getWorktreeSessionLabel', () => {
+    it('returns the worktree name for sessions grouped under a shared repository', () => {
+        const session = makeSession({
+            id: 'worktree-session',
+            metadata: {
+                path: '/work/hapi-worktrees/fix-resume',
+                worktree: {
+                    basePath: '/work/hapi',
+                    branch: 'fix/resume',
+                    name: 'fix-resume',
+                    worktreePath: '/work/hapi-worktrees/fix-resume'
+                }
+            }
+        })
+
+        expect(getWorktreeSessionLabel(session)).toBe('fix-resume')
+    })
+
+    it('does not add a subtitle to ordinary sessions', () => {
+        const session = makeSession({
+            id: 'ordinary-session',
+            metadata: { path: '/work/hapi' }
+        })
+
+        expect(getWorktreeSessionLabel(session)).toBeNull()
+    })
+
+    it('falls back to the worktree directory name when metadata name is blank', () => {
+        const session = makeSession({
+            id: 'windows-worktree-session',
+            metadata: {
+                path: 'C:\\work\\hapi-worktrees\\fix-resume',
+                worktree: {
+                    basePath: 'C:\\work\\hapi',
+                    branch: 'fix/resume',
+                    name: '   ',
+                    worktreePath: 'C:\\work\\hapi-worktrees\\fix-resume\\'
+                }
+            }
+        })
+
+        expect(getWorktreeSessionLabel(session)).toBe('fix-resume')
+    })
+})
 
 describe('deduplicateSessionsByAgentId', () => {
     it('deduplicates sessions with the same agentSessionId', () => {
@@ -238,6 +290,41 @@ describe('session list search helpers', () => {
         expect(sessionMatchesQuery(session, normalizeSearch('desktop'), 'desktop')).toBe(true)
         expect(sessionMatchesQuery(session, normalizeSearch('missing'), 'desktop')).toBe(false)
     })
+
+    it('matches the displayed worktree label and worktree path', () => {
+        const session = makeSession({
+            id: 'worktree-session',
+            metadata: {
+                path: '/work/hapi',
+                worktree: {
+                    basePath: '/work/hapi',
+                    branch: 'fix/sidebar-search',
+                    name: 'sidebar-search',
+                    worktreePath: '/work/hapi-worktrees/fix-sidebar-search'
+                }
+            }
+        })
+
+        expect(sessionMatchesQuery(session, normalizeSearch('sidebar-search'), 'desktop')).toBe(true)
+        expect(sessionMatchesQuery(session, normalizeSearch('hapi-worktrees'), 'desktop')).toBe(true)
+    })
+})
+
+describe('session list time filter helpers', () => {
+    it('treats the selected end date as inclusive in local time', () => {
+        const range = getSessionTimeRange('2026-07-01', '2026-07-18')
+        expect(range).toEqual({
+            start: new Date(2026, 6, 1).getTime(),
+            end: new Date(2026, 6, 19).getTime()
+        })
+        expect(sessionMatchesTimeRange(makeSession({ id: 'inside', updatedAt: new Date(2026, 6, 18, 23, 59).getTime() }), range)).toBe(true)
+        expect(sessionMatchesTimeRange(makeSession({ id: 'outside', updatedAt: new Date(2026, 6, 19).getTime() }), range)).toBe(false)
+    })
+
+    it('does not filter until both dates are selected', () => {
+        expect(getSessionTimeRange('', '')).toBeNull()
+        expect(getSessionTimeRange('2026-07-01', '')).toBeNull()
+    })
 })
 
 describe('getVisibleSessionPreview', () => {
@@ -295,6 +382,51 @@ describe('getVisibleSessionPreview', () => {
     })
 })
 
+
+describe('filterActiveSessionsOnly', () => {
+    it('keeps only active sessions when no selection', () => {
+        const sessions = [
+            makeSession({ id: 'live', active: true, metadata: { path: '/p' } }),
+            makeSession({ id: 'dead', metadata: { path: '/p' } })
+        ]
+        expect(filterActiveSessionsOnly(sessions).map(s => s.id)).toEqual(['live'])
+    })
+
+    it('keeps the selected inactive session visible', () => {
+        const sessions = [
+            makeSession({ id: 'live', active: true, metadata: { path: '/p' } }),
+            makeSession({ id: 'dead', metadata: { path: '/p' } }),
+            makeSession({ id: 'selected-dead', metadata: { path: '/p' } })
+        ]
+        expect(filterActiveSessionsOnly(sessions, 'selected-dead').map(s => s.id).sort())
+            .toEqual(['live', 'selected-dead'])
+    })
+
+    it('preserves input order', () => {
+        const sessions = [
+            makeSession({ id: 'a', active: true, metadata: { path: '/p' } }),
+            makeSession({ id: 'b', metadata: { path: '/p' } }),
+            makeSession({ id: 'c', active: true, metadata: { path: '/p' } })
+        ]
+        expect(filterActiveSessionsOnly(sessions).map(s => s.id)).toEqual(['a', 'c'])
+    })
+})
+
+describe('getNextSessionVisibleCount', () => {
+    it('reveals one batch of step size per call', () => {
+        expect(getNextSessionVisibleCount(8, 8, 20)).toBe(16)
+        expect(getNextSessionVisibleCount(16, 8, 20)).toBe(20)
+    })
+
+    it('never exceeds the total session count', () => {
+        expect(getNextSessionVisibleCount(18, 8, 20)).toBe(20)
+        expect(getNextSessionVisibleCount(20, 8, 20)).toBe(20)
+    })
+
+    it('always advances by at least one even with a zero step', () => {
+        expect(getNextSessionVisibleCount(5, 0, 20)).toBe(6)
+    })
+})
 
 describe('expandSelectedSessionCollapseOverrides', () => {
     it('expands collapsed project and machine, but preserves session preview folding', () => {

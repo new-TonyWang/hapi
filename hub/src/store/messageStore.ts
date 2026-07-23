@@ -10,11 +10,13 @@ import {
     getFirstMessages,
     getDeliverableMessagesAfter,
     getMessagesByPosition,
+    getLocalMessageStates,
     getUninvokedLocalMessages,
     getMatureScheduledMessages,
     getImmediateQueuedLocalMessages,
     countFutureScheduledBySessionIds,
     countFutureScheduledLocalMessages,
+    minFutureScheduledAtBySessionIds,
     countMessages,
     markMessagesInvoked,
     mergeSessionMessages,
@@ -22,6 +24,7 @@ import {
     getAllMessages,
     type CancelQueuedMessageResult,
     type LookupQueuedMessageResult,
+    type LocalMessageState,
 } from './messages'
 
 export class MessageStore {
@@ -63,6 +66,10 @@ export class MessageStore {
         return getMessagesByPosition(this.db, sessionId, limit, before)
     }
 
+    getLocalMessageStates(sessionId: string, localIds: string[]): LocalMessageState[] {
+        return getLocalMessageStates(this.db, sessionId, localIds)
+    }
+
     getUninvokedLocalMessages(sessionId: string): StoredMessage[] {
         return getUninvokedLocalMessages(this.db, sessionId)
     }
@@ -81,6 +88,10 @@ export class MessageStore {
 
     countFutureScheduledBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
         return countFutureScheduledBySessionIds(this.db, sessionIds, now)
+    }
+
+    minFutureScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
+        return minFutureScheduledAtBySessionIds(this.db, sessionIds, now)
     }
 
     countMessages(sessionId: string): number {

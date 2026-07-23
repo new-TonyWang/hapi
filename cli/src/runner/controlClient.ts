@@ -10,9 +10,9 @@ import packageJson from '../../package.json';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { isBunCompiled, projectPath } from '@/projectPath';
-import { isProcessAlive, killProcess } from '@/utils/process';
+import { isProcessAlive, isHapiRunnerProcess, killProcess } from '@/utils/process';
 import { configuration } from '@/configuration';
-import { hashRunnerCliApiToken, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
+import { hashRunnerCliApiToken, hashRunnerExtraHeaders, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
 
 export function getInstalledCliMtimeMs(): number | undefined {
   if (isBunCompiled()) {
@@ -143,12 +143,12 @@ export async function checkIfRunnerRunningAndCleanupStaleState(): Promise<boolea
     return false;
   }
 
-  // Check if the runner is running
-  if (isProcessAlive(state.pid)) {
+  // Verify PID is alive AND belongs to hapi (not a reused PID from another process)
+  if (isHapiRunnerProcess(state.pid)) {
     return true;
   }
 
-  logger.debug('[RUNNER RUN] Runner PID not running, cleaning up state');
+  logger.debug('[RUNNER RUN] Runner PID not running or not a hapi process, cleaning up state');
   await cleanupRunnerState();
   return false;
 }
@@ -219,7 +219,8 @@ export async function isRunnerRunningCurrentlyInstalledHappyVersion(): Promise<b
     const currentIdentityMatches = isRunnerStateCompatibleWithIdentity(state, {
       apiUrl: currentApiUrl,
       machineId: currentMachineId,
-      cliApiTokenHash: hashRunnerCliApiToken(currentCliApiToken)
+      cliApiTokenHash: hashRunnerCliApiToken(currentCliApiToken),
+      extraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders)
     });
     logger.debug(`[RUNNER CONTROL] Runner identity match: ${currentIdentityMatches}`, {
       currentApiUrl,

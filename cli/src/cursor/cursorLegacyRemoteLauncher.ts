@@ -75,6 +75,7 @@ function buildAgentArgs(opts: {
     mode?: string;
     model?: string;
     yolo?: boolean;
+    autoReview?: boolean;
 }): string[] {
     const args = ['-p', opts.message, '--output-format', 'stream-json', '--trust', '--workspace', opts.cwd];
 
@@ -90,15 +91,19 @@ function buildAgentArgs(opts: {
     if (opts.yolo) {
         args.push('--yolo');
     }
+    if (opts.autoReview) {
+        args.push('--auto-review');
+    }
 
     return args;
 }
 
-function permissionModeToAgentArgs(mode?: string): { mode?: string; yolo?: boolean } {
+function permissionModeToAgentArgs(mode?: string): { mode?: string; yolo?: boolean; autoReview?: boolean } {
     if (mode === 'plan') return { mode: 'plan' };
     if (mode === 'ask') return { mode: 'ask' };
     if (mode === 'debug') return { mode: 'debug' };
     if (mode === 'yolo') return { yolo: true };
+    if (mode === 'autoReview') return { autoReview: true };
     return {};
 }
 
@@ -155,7 +160,7 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
             const { message, mode, isolate: batchIsolated } = batch;
             const specialCommand = parseCursorSpecialCommand(message);
 
-            const { mode: agentMode, yolo } = permissionModeToAgentArgs(mode.permissionMode as string);
+            const { mode: agentMode, yolo, autoReview } = permissionModeToAgentArgs(mode.permissionMode as string);
             this.applyDisplayMode(mode.permissionMode as string);
             messageBuffer.addMessage(message, 'user');
 
@@ -170,7 +175,8 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
                 sessionId: cursorSessionId,
                 mode: agentMode,
                 model: mode.model,
-                yolo
+                yolo,
+                autoReview
             });
 
             logger.debug(`[cursor-remote] Spawning agent with args: ${args.join(' ')}`);
@@ -220,15 +226,22 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
                     this.consecutiveTransientFailures = 0;
                     const errMsg = `Agent exited (${exitCode}): ${truncateStderrForDisplay(stderr)}`;
                     logger.warn(`[cursor-remote] ${errMsg}`);
-                    session.sendSessionEvent({ type: 'message', message: errMsg });
+                    const converted = convertAgentMessage({ type: 'error', message: errMsg });
+                    if (converted) {
+                        session.sendAgentMessage(converted);
+                    }
                     messageBuffer.addMessage(errMsg, 'status');
                 }
             } catch (error) {
                 this.consecutiveTransientFailures = 0;
                 logger.warn('[cursor-remote] Agent run failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
-                session.sendSessionEvent({ type: 'message', message: `Cursor Agent failed: ${errMsg}` });
-                messageBuffer.addMessage(`Cursor Agent failed: ${errMsg}`, 'status');
+                const message = `Cursor Agent failed: ${errMsg}`;
+                const converted = convertAgentMessage({ type: 'error', message });
+                if (converted) {
+                    session.sendAgentMessage(converted);
+                }
+                messageBuffer.addMessage(message, 'status');
             } finally {
                 session.onThinkingChange(false);
                 if (session.queue.size() === 0 && !this.shouldExit) {
@@ -317,7 +330,10 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
                 `[cursor-remote] transient agent failures hit cap (${MAX_CONSECUTIVE_TRANSIENT_FAILURES}); dropping message`,
                 { exitCode, stderr: stderr.slice(0, STDERR_DISPLAY_LIMIT) }
             );
-            session.sendSessionEvent({ type: 'message', message: dropMsg });
+            const converted = convertAgentMessage({ type: 'error', message: dropMsg });
+            if (converted) {
+                session.sendAgentMessage(converted);
+            }
             messageBuffer.addMessage(dropMsg, 'status');
             this.consecutiveTransientFailures = 0;
             return;
@@ -343,7 +359,10 @@ class CursorRemoteLauncher extends RemoteLauncherBase {
             session.queue.unshift(message, mode);
         }
         const friendly = friendlyTransientMessage(exitCode, stderr);
-        session.sendSessionEvent({ type: 'message', message: friendly });
+        const converted = convertAgentMessage({ type: 'error', message: friendly });
+        if (converted) {
+            session.sendAgentMessage(converted);
+        }
         messageBuffer.addMessage(friendly, 'status');
         await this.transientBackoff(getTransientBackoffMs());
     }

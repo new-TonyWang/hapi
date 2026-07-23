@@ -15,17 +15,6 @@ import type {
 } from './schemas'
 import type { SessionSummary } from './sessionSummary'
 
-export const CreateOrLoadSessionRequestSchema = z.object({
-    tag: z.string().min(1),
-    metadata: z.unknown(),
-    agentState: z.unknown().nullable().optional(),
-    model: z.string().optional(),
-    modelReasoningEffort: z.string().optional(),
-    effort: z.string().optional()
-})
-
-export type CreateOrLoadSessionRequest = z.infer<typeof CreateOrLoadSessionRequestSchema>
-
 export const CreateOrLoadMachineRequestSchema = z.object({
     id: z.string().min(1),
     metadata: z.unknown(),
@@ -33,6 +22,19 @@ export const CreateOrLoadMachineRequestSchema = z.object({
 })
 
 export type CreateOrLoadMachineRequest = z.infer<typeof CreateOrLoadMachineRequestSchema>
+
+export const CreateOrLoadSessionRequestSchema = z.object({
+    id: z.string().uuid().optional(),
+    tag: z.string().min(1),
+    metadata: z.unknown(),
+    agentState: z.unknown().nullable().optional(),
+    model: z.string().optional(),
+    modelReasoningEffort: z.string().optional(),
+    effort: z.string().optional(),
+    machine: CreateOrLoadMachineRequestSchema.optional()
+})
+
+export type CreateOrLoadSessionRequest = z.infer<typeof CreateOrLoadSessionRequestSchema>
 
 export const CliMessagesResponseSchema = z.object({
     messages: z.array(z.object({
@@ -117,6 +119,65 @@ export const ReopenSessionMissingMetadataResponseSchema = z.object({
 
 export type ReopenSessionMissingMetadataResponse = z.infer<typeof ReopenSessionMissingMetadataResponseSchema>
 
+export const CursorChatStoreStatusSchema = z.object({
+    onDisk: z.boolean(),
+    store: z.enum(['legacy', 'acp']).nullable()
+})
+
+export type CursorChatStoreStatus = z.infer<typeof CursorChatStoreStatusSchema>
+
+export const CodexImportedMessageSchema = z.union([
+    z.object({
+        role: z.literal('user'),
+        content: z.object({ type: z.literal('text'), text: z.string() }),
+        meta: z.object({ sentFrom: z.literal('cli') })
+    }),
+    z.object({
+        role: z.literal('agent'),
+        content: z.object({ type: z.literal('codex'), data: z.unknown() }),
+        meta: z.object({ sentFrom: z.literal('cli') })
+    })
+])
+
+export const CodexLocalSessionSummarySchema = z.object({
+    id: z.string().min(1),
+    title: z.string(),
+    lastUserMessage: z.string().nullable().optional(),
+    cwd: z.string().nullable().optional(),
+    file: z.string().min(1),
+    modifiedAt: z.number(),
+    originator: z.string().nullable().optional(),
+    cliVersion: z.string().nullable().optional(),
+    source: z.string().nullable().optional(),
+    threadSource: z.string().nullable().optional(),
+    forkedFromId: z.string().nullable().optional()
+})
+
+export const CodexLocalSessionWithMessagesSchema = CodexLocalSessionSummarySchema.extend({
+    messages: z.array(CodexImportedMessageSchema)
+})
+
+export const ListCodexSessionsRpcRequestSchema = z.object({
+    cwd: z.string().nullable().optional(),
+    sessionIds: z.array(z.string().min(1)).optional()
+})
+
+export const ListCodexSessionsRpcResponseSchema = z.union([
+    z.object({ success: z.literal(true), sessions: z.array(z.union([CodexLocalSessionWithMessagesSchema, CodexLocalSessionSummarySchema])) }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+
+export const ArchiveCodexSessionRpcRequestSchema = z.object({ sessionId: z.string().min(1) })
+export const ArchiveCodexSessionRpcResponseSchema = z.union([
+    z.object({ success: z.literal(true), archivedPath: z.string() }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+
+export type ListCodexSessionsRpcRequest = z.infer<typeof ListCodexSessionsRpcRequestSchema>
+export type ListCodexSessionsRpcResponse = z.infer<typeof ListCodexSessionsRpcResponseSchema>
+export type ArchiveCodexSessionRpcRequest = z.infer<typeof ArchiveCodexSessionRpcRequestSchema>
+export type ArchiveCodexSessionRpcResponse = z.infer<typeof ArchiveCodexSessionRpcResponseSchema>
+
 export const SessionCollaborationModeRequestSchema = z.object({
     mode: CodexCollaborationModeSchema
 })
@@ -124,7 +185,13 @@ export const SessionCollaborationModeRequestSchema = z.object({
 export type SessionCollaborationModeRequest = z.infer<typeof SessionCollaborationModeRequestSchema>
 
 export const SessionModelRequestSchema = z.object({
-    model: z.string().trim().min(1).nullable()
+    model: z.union([
+        z.string().trim().min(1),
+        z.object({
+            provider: z.string().trim().min(1),
+            modelId: z.string().trim().min(1),
+        }),
+    ]).nullable()
 })
 
 export type SessionModelRequest = z.infer<typeof SessionModelRequestSchema>
@@ -140,6 +207,16 @@ export const SessionEffortRequestSchema = z.object({
 })
 
 export type SessionEffortRequest = z.infer<typeof SessionEffortRequestSchema>
+
+// Fast mode is an explicit two-way choice. `'standard'` (not `null`) is the
+// stored sentinel for an explicit Fast-off so it stays distinct from
+// "untouched" and survives restart/resume. Reject anything else so stray tier
+// strings are never forwarded to the Codex app-server.
+export const SessionServiceTierRequestSchema = z.object({
+    serviceTier: z.enum(['fast', 'standard'])
+})
+
+export type SessionServiceTierRequest = z.infer<typeof SessionServiceTierRequestSchema>
 
 export const RenameSessionRequestSchema = z.object({
     name: z.string().min(1).max(255)
@@ -226,6 +303,20 @@ export const SendMessageRequestSchema = z.object({
 
 export type SendMessageRequest = z.infer<typeof SendMessageRequestSchema>
 
+export const QueuedStateRequestSchema = z.object({
+    localIds: z.array(z.string().min(1)).max(1000)
+})
+
+export type QueuedStateRequest = z.infer<typeof QueuedStateRequestSchema>
+
+export type QueuedStateResponse = {
+    queuedLocalIds: string[]
+    invokedLocalMessages: Array<{
+        localId: string
+        invokedAt: number
+    }>
+}
+
 export const SpawnSessionRequestSchema = z.object({
     directory: z.string().min(1),
     agent: AgentFlavorSchema.optional(),
@@ -235,6 +326,7 @@ export const SpawnSessionRequestSchema = z.object({
     codexProfile: z.string().optional(),
     codexProvider: z.string().optional(),
     yolo: z.boolean().optional(),
+    permissionMode: PermissionModeSchema.optional(),
     sessionType: z.enum(['simple', 'worktree']).optional(),
     worktreeName: z.string().optional()
 })
@@ -332,6 +424,8 @@ export type CodexModelSummary = {
     isDefault: boolean
     defaultReasoningEffort?: string | null
     supportedReasoningEfforts?: string[]
+    /** Service tier ids advertised for this model in the current auth/plan context (e.g. 'fast'). */
+    serviceTiers?: string[]
 }
 
 export type CodexModelsResponse = {
@@ -358,6 +452,34 @@ export type OpencodeModelsResponse = {
 
 export type ListOpencodeModelsResponse = OpencodeModelsResponse
 
+export type GrokModelSummary = {
+    modelId: string
+    name?: string
+    reasoningEfforts?: GrokReasoningEffortOption[]
+}
+
+export type GrokReasoningEffortOption = {
+    value: string
+    name?: string
+    isDefault?: boolean
+}
+
+export type GrokModelsResponse = {
+    success: boolean
+    availableModels?: GrokModelSummary[]
+    currentModelId?: string | null
+    autoPermissionModeSupported?: boolean
+    error?: string
+}
+export type ListGrokModelsResponse = GrokModelsResponse
+
+export type GrokReasoningEffortResponse = {
+    success: boolean
+    options?: GrokReasoningEffortOption[]
+    currentValue?: string | null
+    error?: string
+}
+
 export type OpencodeReasoningEffortOption = {
     value: string
     name?: string
@@ -375,6 +497,41 @@ export type CursorModelSummary = OpencodeModelSummary
 export type CursorModelsResponse = OpencodeModelsResponse
 
 export type ListCursorModelsResponse = CursorModelsResponse
+
+/** Maps thinking levels to provider-specific values. null = unsupported. */
+export type PiThinkingLevelMap = Partial<Record<string, string | null>>
+
+export type PiModelSummary = {
+    provider: string
+    modelId: string
+    name?: string
+    contextWindow?: number
+    /** Whether the model supports reasoning/thinking */
+    reasoning?: boolean
+    /** Maps Pi thinking levels to provider values; null = unsupported level */
+    thinkingLevelMap?: PiThinkingLevelMap
+}
+
+export type PiModelsResponse = {
+    success: boolean
+    availableModels?: PiModelSummary[]
+    currentModelId?: string | null
+    error?: string
+}
+
+export type ListPiModelsResponse = PiModelsResponse
+
+export type PiCommandSummary = {
+    name: string
+    description?: string
+    source: 'extension' | 'prompt' | 'skill'
+}
+
+export type PiCommandsResponse = {
+    success: boolean
+    commands?: PiCommandSummary[]
+    error?: string
+}
 
 export type SlashCommand = {
     name: string

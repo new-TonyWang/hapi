@@ -22,6 +22,8 @@ function makeToolBlock(
             createdAt: 1,
             startedAt: 1,
             completedAt: 2,
+            execStartedAt: null,
+            execCompletedAt: null,
             description: null,
             result: null,
             permission: undefined,
@@ -65,6 +67,8 @@ describe('isEligibleForToolGrouping', () => {
                 createdAt: 1,
                 startedAt: null,
                 completedAt: null,
+                execStartedAt: null,
+                execCompletedAt: null,
                 description: null,
                 permission: {
                     id: 'perm-1',
@@ -84,6 +88,8 @@ describe('isEligibleForToolGrouping', () => {
                 createdAt: 1,
                 startedAt: 1,
                 completedAt: 2,
+                execStartedAt: null,
+                execCompletedAt: null,
                 description: null,
                 permission: {
                     id: 'approved-1',
@@ -101,6 +107,8 @@ describe('isEligibleForToolGrouping', () => {
                 createdAt: 1,
                 startedAt: 1,
                 completedAt: 2,
+                execStartedAt: null,
+                execCompletedAt: null,
                 description: null,
                 permission: {
                     id: 'denied-1',
@@ -121,6 +129,8 @@ describe('isEligibleForToolGrouping', () => {
                 createdAt: 1,
                 startedAt: 1,
                 completedAt: 2,
+                execStartedAt: null,
+                execCompletedAt: null,
                 description: null,
                 permission: {
                     id: 'codex-perm-1',
@@ -128,6 +138,33 @@ describe('isEligibleForToolGrouping', () => {
                 }
             }
         }))).toBe(false)
+    })
+})
+
+describe('Codex activity headings', () => {
+    it('associates only an immediately preceding reasoning heading', () => {
+        const reasoning = makeToolBlock('reasoning-1', 'CodexReasoning', { title: 'Inspecting authentication' })
+        const visible = buildVisibleChatBlocks([
+            reasoning,
+            makeToolBlock('read-1', 'Read', { file_path: 'auth.ts' }),
+            makeToolBlock('read-2', 'Read', { file_path: 'session.ts' }),
+        ], { hasMoreMessages: false })
+
+        expect(visible).toHaveLength(2)
+        expect(isToolGroupBlock(visible[1])).toBe(true)
+        expect(isToolGroupBlock(visible[1]) ? visible[1].activityTitle : null).toBe('Inspecting authentication')
+    })
+
+    it('does not carry a heading across a text boundary', () => {
+        const visible = buildVisibleChatBlocks([
+            makeToolBlock('reasoning-1', 'CodexReasoning', { title: 'Inspecting authentication' }),
+            makeTextBlock('text-boundary'),
+            makeToolBlock('read-1', 'Read', { file_path: 'auth.ts' }),
+            makeToolBlock('read-2', 'Read', { file_path: 'session.ts' }),
+        ], { hasMoreMessages: false })
+
+        const group = visible.find(isToolGroupBlock)
+        expect(group?.activityTitle).toBeNull()
     })
 })
 
@@ -202,6 +239,8 @@ describe('buildVisibleChatBlocks', () => {
                 createdAt: 1,
                 startedAt: 1,
                 completedAt: 2,
+                execStartedAt: null,
+                execCompletedAt: null,
                 description: null,
                 result: 'Approved',
                 permission: {
@@ -276,6 +315,8 @@ describe('buildVisibleChatBlocks', () => {
                 createdAt: 1,
                 startedAt: 1,
                 completedAt: 2,
+                execStartedAt: null,
+                execCompletedAt: null,
                 description: null,
                 result: 'Approved',
                 permission: {

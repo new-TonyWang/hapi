@@ -7,19 +7,16 @@ import { CODEX_PERMISSION_MODES } from '@hapi/protocol/modes'
 import type { CodexPermissionMode } from '@hapi/protocol/types'
 import type { ReasoningEffort } from '@/codex/appServerTypes'
 import { assertCodexLocalSupported } from '@/codex/utils/codexVersion'
+import { parseReasoningEffortValue } from '@/codex/utils/reasoningEffort'
 
-function parseReasoningEffort(value: string): ReasoningEffort {
-    switch (value) {
-        case 'none':
-        case 'minimal':
-        case 'low':
-        case 'medium':
-        case 'high':
-        case 'xhigh':
-            return value
-        default:
-            throw new Error('Invalid --model-reasoning-effort value')
+// Mirror the web /service-tier endpoint's enum so the internal resume spawn
+// path can never seed/persist an unsupported tier string.
+function parseServiceTier(value: string): 'fast' | 'standard' {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'fast' || normalized === 'standard') {
+        return normalized
     }
+    throw new Error('Invalid --service-tier value')
 }
 
 export const codexCommand: CommandDefinition = {
@@ -34,10 +31,12 @@ export const codexCommand: CommandDefinition = {
                 codexArgs?: string[]
                 permissionMode?: CodexPermissionMode
                 resumeSessionId?: string
+                existingSessionId?: string
                 model?: string
                 modelReasoningEffort?: ReasoningEffort
                 codexProfile?: string
                 codexProvider?: string
+                serviceTier?: string
             } = {}
             const unknownArgs: string[] = []
             let hasExplicitPermissionMode = false
@@ -60,6 +59,12 @@ export const codexCommand: CommandDefinition = {
                     if (mode !== 'local' && mode !== 'remote') {
                         throw new Error('Invalid --hapi-starting-mode (expected local or remote)')
                     }
+                } else if (arg === '--existing-session-id') {
+                    const sessionId = commandArgs[++i]
+                    if (!sessionId) {
+                        throw new Error('Missing --existing-session-id value')
+                    }
+                    options.existingSessionId = sessionId
                 } else if (arg === '--permission-mode') {
                     const mode = commandArgs[++i]
                     if (!mode || !(CODEX_PERMISSION_MODES as readonly string[]).includes(mode)) {
@@ -96,7 +101,13 @@ export const codexCommand: CommandDefinition = {
                     if (!effort) {
                         throw new Error('Missing --model-reasoning-effort value')
                     }
-                    options.modelReasoningEffort = parseReasoningEffort(effort)
+                    options.modelReasoningEffort = parseReasoningEffortValue(effort)
+                } else if (arg === '--service-tier') {
+                    const tier = commandArgs[++i]
+                    if (!tier) {
+                        throw new Error('Missing --service-tier value')
+                    }
+                    options.serviceTier = parseServiceTier(tier)
                 } else {
                     unknownArgs.push(arg)
                 }
@@ -110,7 +121,11 @@ export const codexCommand: CommandDefinition = {
             }
 
             await initializeToken()
-            await maybeAutoStartServer()
+            if (options.startedBy === 'runner') {
+                await maybeAutoStartServer()
+            } else {
+                void maybeAutoStartServer({ waitForReady: false, quiet: true })
+            }
             await authAndSetupMachineIfNeeded()
             await runCodex(options)
         } catch (error) {

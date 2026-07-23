@@ -8,6 +8,7 @@ type SessionConfigState<TPermissionMode extends PermissionMode = PermissionMode>
     permissionMode?: TPermissionMode
     model?: string | null
     modelReasoningEffort?: string | null
+    effort?: string | null
 }
 
 type RegisterSessionConfigRpcOptions<TPermissionMode extends PermissionMode = PermissionMode> = {
@@ -15,6 +16,7 @@ type RegisterSessionConfigRpcOptions<TPermissionMode extends PermissionMode = Pe
     flavor: AgentFlavor
     modelMode?: 'nullable' | 'ignore' | 'reject'
     modelReasoningEffortMode?: 'nullable' | 'ignore' | 'reject'
+    effortMode?: 'nullable' | 'ignore' | 'reject'
     appliedFallback?: () => Record<string, unknown>
     onApply: (config: SessionConfigState<TPermissionMode>) => void
     onAfterApply?: () => void
@@ -31,9 +33,21 @@ export function resolveSessionConfigPermissionMode<TPermissionMode extends Permi
     return parsed.data as TPermissionMode
 }
 
+/** Extract `modelId` from either a plain string or a `{ provider, modelId }`
+ *  object (the form Pi sessions receive from the hub). Other agents only pass
+ *  plain strings; the object branch is here for schema consistency so this
+ *  function doesn't throw if the hub later sends the union form to any agent. */
 export function resolveNullableSessionModel(value: unknown): string | null {
     if (value === null) {
         return null
+    }
+    // Pi sessions receive model as { provider, modelId }; extract modelId
+    if (typeof value === 'object' && value !== null) {
+        const modelObj = value as { modelId?: unknown }
+        if (typeof modelObj.modelId === 'string' && modelObj.modelId.trim().length > 0) {
+            return modelObj.modelId.trim()
+        }
+        throw new Error('Invalid model')
     }
     if (typeof value !== 'string' || value.trim().length === 0) {
         throw new Error('Invalid model')
@@ -46,6 +60,7 @@ export function registerSessionConfigRpc<TPermissionMode extends PermissionMode>
     flavor,
     modelMode = 'reject',
     modelReasoningEffortMode = 'reject',
+    effortMode = 'reject',
     appliedFallback,
     onApply,
     onAfterApply
@@ -55,7 +70,7 @@ export function registerSessionConfigRpc<TPermissionMode extends PermissionMode>
             throw new Error('Invalid session config payload')
         }
 
-        const config = payload as { permissionMode?: unknown; model?: unknown; modelReasoningEffort?: unknown }
+        const config = payload as { permissionMode?: unknown; model?: unknown; modelReasoningEffort?: unknown; effort?: unknown }
         const applied: Record<string, unknown> = {}
         const next: SessionConfigState<TPermissionMode> = {}
 
@@ -82,6 +97,16 @@ export function registerSessionConfigRpc<TPermissionMode extends PermissionMode>
             if (modelReasoningEffortMode === 'nullable') {
                 next.modelReasoningEffort = resolveNullableSessionModel(config.modelReasoningEffort)
                 applied.modelReasoningEffort = next.modelReasoningEffort
+            }
+        }
+
+        if (config.effort !== undefined) {
+            if (effortMode === 'reject') {
+                throw new Error('Invalid effort')
+            }
+            if (effortMode === 'nullable') {
+                next.effort = resolveNullableSessionModel(config.effort)
+                applied.effort = next.effort
             }
         }
 

@@ -215,3 +215,61 @@ describe('getToolPresentation — Codex agent tools', () => {
         expect(presentation.minimal).toBe(true)
     })
 })
+
+describe('getToolPresentation — native titles', () => {
+    it('uses a preserved native title for unknown lowercase tools', () => {
+        const presentation = getToolPresentation({
+            toolName: 'bash',
+            input: { command: 'bun test' },
+            result: null,
+            childrenCount: 0,
+            description: 'Run project tests',
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Run project tests')
+        expect(presentation.subtitle).toBe('bun test')
+    })
+})
+
+describe('getToolPresentation — request_user_input', () => {
+    it('uses the question header instead of exposing its protocol id', () => {
+        const presentation = getToolPresentation({
+            toolName: 'request_user_input',
+            input: {
+                questions: [{
+                    id: '__mcp_url_confirmation',
+                    header: 'Sign in',
+                    question: 'Sign in to continue'
+                }]
+            },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Sign in')
+        expect(presentation.title).not.toContain('__mcp_url_confirmation')
+        expect(presentation.subtitle).toBe('Sign in to continue')
+    })
+
+    it('falls back to Question rather than exposing an id when no header is present', () => {
+        const presentation = getToolPresentation({
+            toolName: 'request_user_input',
+            input: {
+                questions: [{
+                    id: '__mcp_form_confirmation',
+                    question: 'Continue?'
+                }]
+            },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Question')
+        expect(presentation.subtitle).toBe('Continue?')
+    })
+})

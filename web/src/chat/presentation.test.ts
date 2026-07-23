@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { getEventPresentation, formatMessageTimestamp, formatResetTime } from './presentation'
 
+describe('getEventPresentation — agent errors', () => {
+    it('formats error events with warning icon and message text', () => {
+        const result = getEventPresentation({
+            type: 'error',
+            message: 'Cursor Agent failed: authentication required'
+        })
+
+        expect(result.icon).toBe('⚠️')
+        expect(result.text).toBe('Cursor Agent failed: authentication required')
+    })
+})
+
 describe('getEventPresentation — limit-warning', () => {
     it('formats five_hour warning', () => {
         const result = getEventPresentation({
@@ -119,6 +131,18 @@ describe('getEventPresentation — thread goals', () => {
         const result = getEventPresentation({ type: 'thread-goal-cleared', threadId: 'thread-1' })
 
         expect(result.text).toBe('Goal cleared')
+    })
+})
+
+describe('getEventPresentation — recap (away_summary)', () => {
+    it('formats the recap with a recap: prefix', () => {
+        const result = getEventPresentation({
+            type: 'recap',
+            text: 'Building the login flow, next: wire up the submit handler.'
+        })
+
+        expect(result.icon).toBe('💭')
+        expect(result.text).toBe('recap: Building the login flow, next: wire up the submit handler.')
     })
 })
 

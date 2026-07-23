@@ -62,6 +62,20 @@ describe('codexCommand', () => {
         expect(runCodexMock).toHaveBeenCalledWith({})
     })
 
+    it('does not block local Codex startup on Hub auto-start readiness', async () => {
+        maybeAutoStartServerMock.mockImplementationOnce(async () => {
+            await new Promise(() => {})
+        })
+
+        await codexCommand.run(createCommandContext([]))
+
+        expect(runCodexMock).toHaveBeenCalledOnce()
+        expect(maybeAutoStartServerMock).toHaveBeenCalledWith({
+            waitForReady: false,
+            quiet: true
+        })
+    })
+
     it('checks Codex version before resuming a local session', async () => {
         await codexCommand.run(createCommandContext(['resume', 'session-123']))
 
@@ -77,6 +91,47 @@ describe('codexCommand', () => {
         expect(assertCodexLocalSupportedMock).not.toHaveBeenCalled()
         expect(runCodexMock).toHaveBeenCalledWith({
             startedBy: 'runner'
+        })
+    })
+
+    it('forwards a valid --service-tier to runCodex', async () => {
+        await codexCommand.run(createCommandContext(['--started-by', 'runner', '--service-tier', 'fast']))
+
+        expect(runCodexMock).toHaveBeenCalledWith({
+            startedBy: 'runner',
+            serviceTier: 'fast'
+        })
+    })
+
+    it('rejects an unsupported --service-tier value', async () => {
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+            throw new Error(`process.exit:${code ?? 'undefined'}`)
+        }) as never)
+
+        try {
+            await expect(
+                codexCommand.run(createCommandContext(['--started-by', 'runner', '--service-tier', 'turbo']))
+            ).rejects.toThrow('process.exit:1')
+            expect(runCodexMock).not.toHaveBeenCalled()
+            expect(consoleErrorSpy).toHaveBeenCalledWith(expect.any(String), 'Invalid --service-tier value')
+        } finally {
+            consoleErrorSpy.mockRestore()
+            exitSpy.mockRestore()
+        }
+    })
+
+    it('accepts and normalizes a dynamic model reasoning effort', async () => {
+        await codexCommand.run(createCommandContext([
+            '--started-by',
+            'runner',
+            '--model-reasoning-effort',
+            ' EXTREME '
+        ]))
+
+        expect(runCodexMock).toHaveBeenCalledWith({
+            startedBy: 'runner',
+            modelReasoningEffort: 'extreme'
         })
     })
 

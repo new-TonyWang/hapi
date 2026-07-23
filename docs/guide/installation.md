@@ -4,7 +4,7 @@ Install the HAPI CLI and set up the hub.
 
 ## Prerequisites
 
-- Claude Code, OpenAI Codex CLI, Cursor Agent CLI, Google Gemini CLI, or OpenCode CLI installed
+- Claude Code, OpenAI Codex CLI, Cursor Agent CLI, Grok Build CLI, or OpenCode CLI installed
 
 Verify your CLI is installed:
 
@@ -18,8 +18,8 @@ codex --version
 # For Cursor Agent CLI
 agent --version
 
-# For Google Gemini CLI
-gemini --version
+# For Grok Build CLI
+grok --version
 
 # For OpenCode CLI
 opencode --version
@@ -31,7 +31,7 @@ HAPI has three components:
 
 | Component | Role | Required |
 |-----------|------|----------|
-| **CLI** | Wraps AI agents (Claude/Codex/Cursor/Gemini/OpenCode), runs sessions | Yes |
+| **CLI** | Wraps AI agents (Claude/Codex/Cursor/Grok/OpenCode), runs sessions | Yes |
 | **Hub** | Central coordinator: persistence, real-time sync, remote access | Yes |
 | **Runner** | Background service for remote session spawning | Optional |
 
@@ -177,7 +177,7 @@ On first run, HAPI:
 |----------|---------|---------------|-------------|
 | `CLI_API_TOKEN` | Auto-generated | `cliApiToken` | Shared secret for authentication |
 | `HAPI_API_URL` | `http://localhost:3006` | `apiUrl` | Hub URL for CLI connections |
-| `HAPI_EXTRA_HEADERS_JSON` | - | - | JSON object of extra outbound headers for CLI → hub HTTP/WebSocket requests |
+| `HAPI_EXTRA_HEADERS_JSON` | - | `extraHeaders` | JSON object of extra outbound headers for CLI → hub HTTP/WebSocket requests |
 | `HAPI_LISTEN_HOST` | `127.0.0.1` | `listenHost` | Hub HTTP bind address |
 | `HAPI_LISTEN_PORT` | `3006` | `listenPort` | Hub HTTP port |
 | `HAPI_PUBLIC_URL` | - | `publicUrl` | Public URL for external access |
@@ -198,13 +198,17 @@ On first run, HAPI:
 Configuration priority: **ENV > settings.json > default**
 
 When ENV values are set and not present in settings.json, they are automatically saved.
+`HAPI_EXTRA_HEADERS_JSON` is not automatically saved, so access credentials are not persisted unexpectedly.
 
 ```json
 {
   "$schema": "https://hapi.run/docs/schemas/settings.schema.json",
   "listenHost": "0.0.0.0",
   "listenPort": 3006,
-  "publicUrl": "https://your-domain.com"
+  "publicUrl": "https://your-domain.com",
+  "extraHeaders": {
+    "Cookie": "CF_Authorization=..."
+  }
 }
 ```
 
@@ -536,6 +540,7 @@ After=network.target hapi-hub.service
 
 [Service]
 Type=simple
+KillMode=process
 ExecStart=/usr/local/bin/hapi runner start-sync
 Restart=always
 RestartSec=5
@@ -543,6 +548,8 @@ RestartSec=5
 [Install]
 WantedBy=default.target
 ```
+
+> **Why `KillMode=process`?** The runner spawns each agent session as a detached child process (`detached: true` in `cli/src/runner/run.ts`) so that sessions stay alive when the runner exits. Without `KillMode=process`, systemd's default `KillMode=control-group` sends SIGTERM to every PID in the runner's cgroup when the unit stops, defeating the detach and forcibly archiving every running session. `KillMode=process` preserves the contract: stopping or restarting the runner only signals the runner itself; agent sessions stay alive, and a fresh runner re-establishes control via the existing socket.io reconnect path. This applies to runner upgrades, manual restarts, and any reboot in which the runner unit is stopped before agents have finished.
 
 Enable and start:
 

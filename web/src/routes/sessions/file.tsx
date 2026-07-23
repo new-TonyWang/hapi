@@ -13,6 +13,14 @@ import { langAlias, useShikiHighlighter } from '@/lib/shiki'
 import { useTranslation } from '@/lib/use-translation'
 import { decodeBase64 } from '@/lib/utils'
 import { ImagePreview } from '@/components/ImagePreview'
+import { MarkdownRenderer } from '@/components/MarkdownRenderer'
+import {
+    getInitialMarkdownPreviewMode,
+    isMarkdownFile,
+    persistMarkdownPreviewMode,
+    type MarkdownPreviewMode,
+} from '@/lib/file-markdown-preview'
+import { downloadBase64File } from '@/lib/file-download'
 
 const MAX_COPYABLE_FILE_BYTES = 1_000_000
 const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
@@ -34,6 +42,27 @@ function decodePath(value: string): string {
     if (!value) return ''
     const decoded = decodeBase64(value)
     return decoded.ok ? decoded.text : value
+}
+
+function DownloadIcon(props: { className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+        >
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+    )
 }
 
 function BackIcon(props: { className?: string }) {
@@ -155,6 +184,7 @@ export default function FilePage() {
     const filePath = useMemo(() => decodePath(encodedPath), [encodedPath])
     const fileName = filePath.split('/').pop() || filePath || t('file.page.fallbackName')
     const imageMimeType = useMemo(() => resolveImageMimeType(filePath), [filePath])
+    const markdownFile = useMemo(() => isMarkdownFile(filePath), [filePath])
 
     const diffQuery = useQuery({
         queryKey: queryKeys.gitFileDiff(sessionId, filePath, staged),
@@ -196,7 +226,12 @@ export default function FilePage() {
         : null
 
     const language = useMemo(() => imageMimeType ? undefined : resolveLanguage(filePath), [filePath, imageMimeType])
-    const highlighted = useShikiHighlighter(imageMimeType ? '' : decodedContent, language)
+    const [markdownMode, setMarkdownMode] = useState<MarkdownPreviewMode>(getInitialMarkdownPreviewMode)
+    const showMarkdownSource = !markdownFile || markdownMode === 'source'
+    const highlighted = useShikiHighlighter(
+        imageMimeType || (markdownFile && !showMarkdownSource) ? '' : decodedContent,
+        language
+    )
     const contentSizeBytes = useMemo(
         () => (decodedContent ? getUtf8ByteLength(decodedContent) : 0),
         [decodedContent]
@@ -206,7 +241,14 @@ export default function FilePage() {
         && decodedContent.length > 0
         && contentSizeBytes <= MAX_COPYABLE_FILE_BYTES
 
+    const canDownload = fileContentResult?.success === true && Boolean(fileContentResult.content)
+
     const [displayMode, setDisplayMode] = useState<'diff' | 'file'>('diff')
+
+    const setMarkdownPreviewMode = (mode: MarkdownPreviewMode) => {
+        setMarkdownMode(mode)
+        persistMarkdownPreviewMode(mode)
+    }
 
     useEffect(() => {
         if (imageMimeType) {
@@ -260,26 +302,59 @@ export default function FilePage() {
                     >
                         {pathCopied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
                     </button>
+                    {canDownload ? (
+                        <button
+                            type="button"
+                            onClick={() => downloadBase64File(fileName, fileContentResult!.content!, imageMimeType)}
+                            className="shrink-0 rounded p-1 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)] transition-colors"
+                            title={t('file.page.download')}
+                        >
+                            <DownloadIcon className="h-3.5 w-3.5" />
+                        </button>
+                    ) : null}
                 </div>
             </div>
 
-            {diffContent ? (
+            {diffContent || (markdownFile && displayMode === 'file') ? (
                 <div className="bg-[var(--app-bg)]">
                     <div className="mx-auto w-full max-w-content px-3 py-2 flex items-center gap-2 border-b border-[var(--app-divider)]">
-                        <button
-                            type="button"
-                            onClick={() => setDisplayMode('diff')}
-                            className={`rounded px-3 py-1 text-xs font-semibold ${displayMode === 'diff' ? 'bg-[var(--app-button)] text-[var(--app-button-text)] opacity-80' : 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]'}`}
-                        >
-                            {t('file.page.tab.diff')}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => setDisplayMode('file')}
-                            className={`rounded px-3 py-1 text-xs font-semibold ${displayMode === 'file' ? 'bg-[var(--app-button)] text-[var(--app-button-text)] opacity-80' : 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]'}`}
-                        >
-                            {t('file.page.tab.file')}
-                        </button>
+                        {diffContent ? (
+                            <>
+                                <button
+                                    type="button"
+                                    onClick={() => setDisplayMode('diff')}
+                                    className={`rounded px-3 py-1 text-xs font-semibold ${displayMode === 'diff' ? 'bg-[var(--app-button)] text-[var(--app-button-text)] opacity-80' : 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]'}`}
+                                >
+                                    {t('file.page.tab.diff')}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setDisplayMode('file')}
+                                    className={`rounded px-3 py-1 text-xs font-semibold ${displayMode === 'file' ? 'bg-[var(--app-button)] text-[var(--app-button-text)] opacity-80' : 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]'}`}
+                                >
+                                    {t('file.page.tab.file')}
+                                </button>
+                            </>
+                        ) : null}
+                        {markdownFile && displayMode === 'file' ? (
+                            <>
+                                {diffContent ? <span className="mx-1 h-4 w-px bg-[var(--app-divider)]" aria-hidden="true" /> : null}
+                                <button
+                                    type="button"
+                                    onClick={() => setMarkdownPreviewMode('source')}
+                                    className={`rounded px-3 py-1 text-xs font-semibold ${showMarkdownSource ? 'bg-[var(--app-button)] text-[var(--app-button-text)] opacity-80' : 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]'}`}
+                                >
+                                    {t('file.page.tab.source')}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setMarkdownPreviewMode('preview')}
+                                    className={`rounded px-3 py-1 text-xs font-semibold ${!showMarkdownSource ? 'bg-[var(--app-button)] text-[var(--app-button-text)] opacity-80' : 'bg-[var(--app-subtle-bg)] text-[var(--app-hint)]'}`}
+                                >
+                                    {t('file.page.tab.preview')}
+                                </button>
+                            </>
+                        ) : null}
                     </div>
                 </div>
             ) : null}
@@ -314,21 +389,37 @@ export default function FilePage() {
                             </div>
                         ) : (
                             decodedContent ? (
-                                <div className="relative">
-                                    {canCopyContent ? (
-                                        <button
-                                            type="button"
-                                            onClick={() => copyContent(decodedContent)}
-                                            className="absolute right-2 top-2 z-10 rounded p-1 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)] transition-colors"
-                                            title={t('file.page.copyContent')}
-                                        >
-                                            {contentCopied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
-                                        </button>
-                                    ) : null}
-                                    <pre className="shiki overflow-auto rounded-md bg-[var(--app-code-bg)] p-3 pr-8 text-xs font-mono">
-                                        <code>{highlighted ?? decodedContent}</code>
-                                    </pre>
-                                </div>
+                                markdownFile && !showMarkdownSource ? (
+                                    <div className="markdown-content relative">
+                                        {canCopyContent ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => copyContent(decodedContent)}
+                                                className="absolute right-2 top-2 z-10 rounded p-1 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)] transition-colors"
+                                                title={t('file.page.copyContent')}
+                                            >
+                                                {contentCopied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+                                            </button>
+                                        ) : null}
+                                        <MarkdownRenderer content={decodedContent} standalone />
+                                    </div>
+                                ) : (
+                                    <div className="relative">
+                                        {canCopyContent ? (
+                                            <button
+                                                type="button"
+                                                onClick={() => copyContent(decodedContent)}
+                                                className="absolute right-2 top-2 z-10 rounded p-1 text-[var(--app-hint)] hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)] transition-colors"
+                                                title={t('file.page.copyContent')}
+                                            >
+                                                {contentCopied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+                                            </button>
+                                        ) : null}
+                                        <pre className="shiki overflow-auto rounded-md bg-[var(--app-code-bg)] p-3 pr-8 text-xs font-mono">
+                                            <code>{highlighted ?? decodedContent}</code>
+                                        </pre>
+                                    </div>
+                                )
                             ) : (
                                 <div className="text-sm text-[var(--app-hint)]">{t('file.page.empty')}</div>
                             )

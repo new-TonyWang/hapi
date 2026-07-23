@@ -12,15 +12,24 @@ import {
 import { OpencodeDisplay } from '@/ui/ink/OpencodeDisplay';
 import type { CursorSession } from './session';
 import type { PermissionMode } from './loop';
-import { createCursorAcpBackend, CURSOR_ACP_REQUIRED_MESSAGE } from './utils/cursorAcpBackend';
+import {
+    createCursorAcpBackend,
+    CURSOR_ACP_REQUIRED_MESSAGE,
+    resolveCursorNativeWorktreePath
+} from './utils/cursorAcpBackend';
 import { setCursorAcpModelsSnapshot } from './utils/cursorAcpModelsBridge';
 import { buildCursorModelsSnapshotFromAcp } from './utils/cursorAcpModelsSnapshot';
 import { CursorExtensionAdapter } from './utils/cursorExtensionAdapter';
-import { applyCursorAcpMode, applyCursorAcpModel, wireIdForCursorSessionState } from './utils/cursorModeConfig';
+import {
+    applyCursorAcpMode,
+    applyCursorAcpModel,
+    isCursorAutoReviewMode,
+    wireIdForCursorSessionState
+} from './utils/cursorModeConfig';
+import { cursorPassThroughStatusMessage, parseCursorSpecialCommand } from './cursorSpecialCommands';
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
-
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
     private backend: ReturnType<typeof createCursorAcpBackend> | null = null;
@@ -33,7 +42,10 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private defaultBackendModel: string | null = null;
     private unregisterModelApplyHandler: (() => void) | null = null;
     private modelApplySeq = 0;
-
+    /** True when ACP process was spawned with `--auto-review`. */
+    private spawnedWithAutoReview = false;
+    /** Avoid re-queueing `/auto-review` on every mid-session mode sync. */
+    private autoReviewSlashQueued = false;
     constructor(session: CursorSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
@@ -54,17 +66,31 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const session = this.session;
         const messageBuffer = this.messageBuffer;
 
-        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client);
+        const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            skillLookup: { workingDirectory: session.path, flavor: 'cursor' }
+        });
         this.happyServer = happyServer;
 
-        const backend = createCursorAcpBackend({ cwd: session.path, model: session.model });
+        const autoReview = isCursorAutoReviewMode(session.getPermissionMode() as PermissionMode);
+        this.spawnedWithAutoReview = autoReview;
+        const backend = createCursorAcpBackend({
+            cwd: session.path,
+            model: session.model,
+            autoReview,
+            worktree: session.cursorWorktree,
+            addDirs: session.cursorAddDirs
+        });
         this.backend = backend;
+        this.recordCursorNativeWorktreeMetadata();
 
         backend.setUsageUpdateListener((message) => this.handleAgentMessage(message));
 
         backend.onStderrError((error) => {
             logger.debug('[cursor-acp] stderr error', error);
-            session.sendSessionEvent({ type: 'message', message: error.message });
+            const converted = convertAgentMessage({ type: 'error', message: error.message });
+            if (converted) {
+                session.sendAgentMessage(converted);
+            }
             messageBuffer.addMessage(error.message, 'status');
         });
 
@@ -72,7 +98,13 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             await backend.initialize();
         } catch (error) {
             const errMsg = error instanceof Error ? error.message : String(error);
-            throw new Error(`${CURSOR_ACP_REQUIRED_MESSAGE} (${errMsg})`);
+            const fullMsg = `${CURSOR_ACP_REQUIRED_MESSAGE} (${errMsg})`;
+            const converted = convertAgentMessage({ type: 'error', message: fullMsg });
+            if (converted) {
+                session.sendAgentMessage(converted);
+            }
+            messageBuffer.addMessage(fullMsg, 'status');
+            throw new Error(fullMsg);
         }
 
         await backend.authenticateIfAvailable('cursor_login');
@@ -105,7 +137,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                     mcpServers: mcpServerList
                 });
             } catch (error) {
-                logger.warn('[cursor-acp] session/load failed', error);
+                logger.warn('[cursor-acp] session/load failed', formatAcpLoadError(error));
                 throw new Error(
                     'Failed to resume Cursor ACP session. Legacy stream-json sessions cannot be loaded via ACP.'
                 );
@@ -123,7 +155,21 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
         if (acpSessionId !== resumeSessionId) {
             session.onSessionFoundWithProtocol(acpSessionId, 'acp');
+            // tiann/hapi#913: block until the metadata write that pins
+            // `cursorSessionId` reaches the hub DB before we drop into
+            // `runMainLoop`. If SIGTERM (hub-restart cascade) lands during
+            // the first turn without this gate, the only durable handle
+            // linking the session to its on-disk ACP store is lost and the
+            // session strands. The resume path at lines 98-100 already
+            // relies on the latency of `backend.loadSession()` to flush the
+            // same write; the fresh-session path has no such cover.
+            const flushed = await session.client.flushMetadata();
+            if (!flushed) {
+                logger.warn(`[cursor-acp] cursorSessionId metadata write did not ACK within 5s; session may be unrecoverable if killed before the lock drains (acpSessionId=${acpSessionId})`);
+            }
         }
+
+        session.client.emitSessionReady();
 
         syncCursorModelsFromAcp(backend, acpSessionId);
 
@@ -186,8 +232,15 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
 
             await applyCursorAcpMode(backend, acpSessionId, batch.mode.permissionMode as PermissionMode);
             this.applyDisplayMode(batch.mode.permissionMode as PermissionMode);
+
+            const specialCommand = parseCursorSpecialCommand(batch.message);
+            if (specialCommand.type === 'pass-through') {
+                messageBuffer.addMessage(cursorPassThroughStatusMessage(specialCommand.command), 'status');
+            }
             messageBuffer.addMessage(batch.message, 'user');
 
+            // skill_lookup discovery lives on the MCP tool description — do not
+            // prepend instructions onto user turns (prompt-injection false positive).
             const promptContent: PromptContent[] = [{
                 type: 'text',
                 text: batch.message
@@ -202,11 +255,12 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
-                session.sendSessionEvent({
-                    type: 'message',
-                    message: `Cursor Agent failed: ${errMsg}`
-                });
-                messageBuffer.addMessage(`Cursor Agent failed: ${errMsg}`, 'status');
+                const message = `Cursor Agent failed: ${errMsg}`;
+                const converted = convertAgentMessage({ type: 'error', message });
+                if (converted) {
+                    session.sendAgentMessage(converted);
+                }
+                messageBuffer.addMessage(message, 'status');
             } finally {
                 session.onThinkingChange(false);
                 await this.permissionAdapter?.cancelAll('Prompt finished');
@@ -269,6 +323,9 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             case 'plan':
                 this.messageBuffer.addMessage('Plan updated', 'status');
                 break;
+            case 'error':
+                this.messageBuffer.addMessage(message.message, 'status');
+                break;
             case 'turn_complete':
                 break;
             default:
@@ -288,6 +345,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             void applyCursorAcpMode(backend, acpSessionId, mode).then(() => {
                 this.applyDisplayMode(mode);
             });
+            this.maybeQueueAutoReviewSlash(mode);
         };
 
         this.unregisterModelApplyHandler = session.registerModelApplyHandler(async (model) => (
@@ -408,6 +466,52 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         }
     }
 
+    /**
+     * Mid-session Auto-review: ACP has no config option, so when the process was
+     * not spawned with `--auto-review`, queue an isolated `/auto-review` slash once.
+     */
+    private maybeQueueAutoReviewSlash(mode: PermissionMode): void {
+        if (!isCursorAutoReviewMode(mode)) {
+            return;
+        }
+        if (this.spawnedWithAutoReview || this.autoReviewSlashQueued) {
+            return;
+        }
+        this.autoReviewSlashQueued = true;
+        this.session.queue.pushIsolated(
+            '/auto-review',
+            {
+                permissionMode: mode,
+                model: this.session.model
+            }
+        );
+        this.messageBuffer.addMessage(cursorPassThroughStatusMessage('auto-review'), 'status');
+    }
+
+    private recordCursorNativeWorktreeMetadata(): void {
+        const worktree = this.session.cursorWorktree;
+        if (worktree === undefined || worktree === false) {
+            return;
+        }
+        const name = typeof worktree === 'string' ? worktree.trim() : '';
+        if (!name) {
+            this.messageBuffer.addMessage('Cursor native worktree enabled', 'status');
+            return;
+        }
+        const worktreePath = resolveCursorNativeWorktreePath(this.session.path, name);
+        this.session.client.updateMetadata((metadata) => ({
+            ...metadata,
+            worktree: {
+                basePath: this.session.path,
+                branch: name,
+                name,
+                worktreePath,
+                createdAt: Date.now()
+            }
+        }));
+        this.messageBuffer.addMessage(`Cursor worktree: ${worktreePath}`, 'status');
+    }
+
     private async handleAbort(): Promise<void> {
         const backend = this.backend;
         const sessionId = this.session.sessionId;
@@ -434,6 +538,34 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private async handleSwitchRequest(): Promise<void> {
         await this.requestExit('switch', () => this.handleAbort());
     }
+}
+
+function formatAcpLoadError(error: unknown): Record<string, unknown> {
+    if (error instanceof Error) {
+        const record: Record<string, unknown> = {
+            name: error.name,
+            message: error.message
+        };
+        const code = (error as Error & { code?: unknown }).code;
+        if (code !== undefined) {
+            record.code = code;
+        }
+        const data = (error as Error & { data?: unknown }).data;
+        if (data !== undefined) {
+            record.data = data;
+        }
+        const cause = error.cause;
+        if (cause !== undefined) {
+            record.cause = cause instanceof Error
+                ? { name: cause.name, message: cause.message }
+                : cause;
+        }
+        return record;
+    }
+    if (typeof error === 'object' && error !== null) {
+        return { ...(error as Record<string, unknown>) };
+    }
+    return { message: String(error) };
 }
 
 function isSpawnDefaultModel(modelId: string): boolean {

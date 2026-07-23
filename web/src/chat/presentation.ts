@@ -63,7 +63,7 @@ function formatLimitType(limitType: string | undefined): string {
     return limitType.replace(/_/g, ' ')
 }
 
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
     const seconds = ms / 1000
     if (seconds < 60) return `${seconds.toFixed(1)}s`
     const mins = Math.floor(seconds / 60)
@@ -182,6 +182,9 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
         const suffix = typeLabel ? ` (${typeLabel})` : ''
         return { icon: '⏳', text: endsAt ? `Usage limit reached${suffix} until ${formatUnixTimestamp(endsAt)}` : `Usage limit reached${suffix}` }
     }
+    if (event.type === 'error') {
+        return { icon: '⚠️', text: typeof event.message === 'string' ? event.message : 'Error' }
+    }
     if (event.type === 'message') {
         return { icon: null, text: typeof event.message === 'string' ? event.message : 'Message' }
     }
@@ -196,6 +199,11 @@ export function getEventPresentation(event: AgentEvent): EventPresentation {
     }
     if (event.type === 'compact') {
         return { icon: '📦', text: 'Conversation compacted' }
+    }
+    if (event.type === 'recap') {
+        // Lowercase `recap:` intentionally mirrors Claude Code's own TUI recap label.
+        const text = typeof event.text === 'string' ? event.text : ''
+        return { icon: '💭', text: `recap: ${text}` }
     }
     if (event.type === 'thread-goal-updated') {
         return formatThreadGoalEvent(event)

@@ -16,6 +16,7 @@ export type UsageData = {
 export type AgentEvent =
     | { type: 'switch'; mode: 'local' | 'remote' }
     | { type: 'message'; message: string }
+    | { type: 'error'; message: string }
     | { type: 'title-changed'; title: string }
     | { type: 'limit-reached'; endsAt: number; limitType: string }
     | { type: 'limit-warning'; /** 0–1 ratio (e.g. 0.9 = 90%), integer-precision via CLI pipe format */ utilization: number; endsAt: number; limitType: string }
@@ -24,6 +25,8 @@ export type AgentEvent =
     | { type: 'turn-duration'; durationMs: number; targetMessageId?: string }
     | { type: 'microcompact'; trigger: string; preTokens: number; tokensSaved: number }
     | { type: 'compact'; trigger: string; preTokens: number }
+    // Claude Code's automatic away-summary recap (TUI window blur 5min+, then focus).
+    | { type: 'recap'; text: string }
     | { type: 'thread-goal-updated'; goal: ThreadGoal; threadId?: string; turnId?: string }
     | { type: 'thread-goal-cleared'; threadId?: string }
     | ({ type: string } & Record<string, unknown>)
@@ -42,6 +45,8 @@ export type ToolUse = {
     name: string
     input: unknown
     description: string | null
+    nativeTitle?: string | null
+    nativeKind?: string | null
     uuid: string
     parentUUID: string | null
 }
@@ -128,6 +133,14 @@ export type NormalizedMessage = ({
     originalText?: string
     invokedAt?: number | null
     model?: string | null
+    /**
+     * Execution-machine wall clock (epoch ms) parsed from the Claude entry's
+     * own `timestamp` field (see `parseAgentTimestampMs`), as opposed to
+     * `createdAt` which is when the hub received the message. Null when the
+     * source entry has no parseable timestamp (e.g. non-Claude agent
+     * flavors) — consumers should fall back to `createdAt` in that case.
+     */
+    agentTimestamp?: number | null
 }
 
 export type ToolPermission = {
@@ -151,7 +164,21 @@ export type ChatToolCall = {
     createdAt: number
     startedAt: number | null
     completedAt: number | null
+    /**
+     * Execution-machine timestamps (from `NormalizedMessage.agentTimestamp`)
+     * for the tool_use/tool_result entries, when available. Kept separate
+     * from `startedAt`/`completedAt` (rather than replacing them) because the
+     * running-state live timer (`ElapsedView`) reads `startedAt` directly —
+     * swapping that to the execution machine's clock would expose it to
+     * viewer/execution-machine clock skew. `toolDurationMs` prefers these
+     * fields for *completed* tool duration only; null when the source Claude
+     * entry had no parseable timestamp (e.g. non-Claude agent flavors).
+     */
+    execStartedAt: number | null
+    execCompletedAt: number | null
     description: string | null
+    nativeTitle?: string | null
+    nativeKind?: string | null
     result?: unknown
     permission?: ToolPermission
 }

@@ -258,6 +258,35 @@ export function getUninvokedLocalMessages(
     return rows.map(toStoredMessage)
 }
 
+export type LocalMessageState = {
+    localId: string
+    invokedAt: number | null
+}
+
+export function getLocalMessageStates(
+    db: Database,
+    sessionId: string,
+    localIds: string[]
+): LocalMessageState[] {
+    if (localIds.length === 0) {
+        return []
+    }
+    const placeholders = localIds.map(() => '?').join(', ')
+    const rows = db.prepare(`
+        SELECT local_id, invoked_at
+        FROM messages
+        WHERE session_id = ? AND local_id IN (${placeholders})
+        ORDER BY seq ASC
+    `).all(sessionId, ...localIds) as Array<{
+        local_id: string
+        invoked_at: number | null
+    }>
+    return rows.map((row) => ({
+        localId: row.local_id,
+        invokedAt: row.invoked_at
+    }))
+}
+
 /** Returns scheduled messages across all sessions whose scheduled_at <= beforeTime
  *  and have not yet been invoked.  Used by the hub tick to emit mature messages to CLI.
  *  Ordered by scheduled_at ASC (oldest first). */
@@ -359,6 +388,35 @@ export function countFutureScheduledBySessionIds(
         counts.set(row.session_id, row.count)
     }
     return counts
+}
+
+/** Earliest future scheduled_at per session (session-list clock tooltip). */
+export function minFutureScheduledAtBySessionIds(
+    db: Database,
+    sessionIds: string[],
+    now: number
+): Map<string, number> {
+    const nextAt = new Map<string, number>()
+    if (sessionIds.length === 0) {
+        return nextAt
+    }
+
+    const placeholders = sessionIds.map(() => '?').join(',')
+    const rows = db.prepare(`
+        SELECT session_id, MIN(scheduled_at) AS next_at
+        FROM messages
+        WHERE session_id IN (${placeholders})
+          AND invoked_at IS NULL
+          AND local_id IS NOT NULL
+          AND scheduled_at IS NOT NULL
+          AND scheduled_at > ?
+        GROUP BY session_id
+    `).all(...sessionIds, now) as { session_id: string; next_at: number }[]
+
+    for (const row of rows) {
+        nextAt.set(row.session_id, row.next_at)
+    }
+    return nextAt
 }
 
 export function getMaxSeq(db: Database, sessionId: string): number {

@@ -7,7 +7,7 @@ import type {
     ClaudePermissionMode,
     CodexPermissionMode,
     CursorPermissionMode,
-    GeminiPermissionMode,
+    GrokPermissionMode,
     KimiPermissionMode,
     OpencodePermissionMode
 } from '@hapi/protocol/types'
@@ -104,17 +104,7 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
     }
 
     if (target.flavor === 'gemini') {
-        const { runGemini } = await import('@/gemini/runGemini')
-        await runGemini({
-            existingSessionId: base.existingSessionId,
-            workingDirectory: base.workingDirectory,
-            resumeSessionId: base.resumeSessionId,
-            startedBy: base.startedBy,
-            permissionMode: base.permissionMode as GeminiPermissionMode | undefined,
-            startingMode: 'local',
-            model: target.model ?? undefined
-        })
-        return
+        throw new Error('Gemini CLI is no longer supported and cannot be resumed (Google sunset the consumer Gemini CLI on 2026-06-18). The session history remains viewable in the web UI.')
     }
 
     if (target.flavor === 'opencode') {
@@ -131,6 +121,21 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
         return
     }
 
+    if (target.flavor === 'grok') {
+        const { runGrok } = await import('@/grok/runGrok')
+        await runGrok({
+            existingSessionId: base.existingSessionId,
+            workingDirectory: base.workingDirectory,
+            resumeSessionId: base.resumeSessionId,
+            startedBy: base.startedBy,
+            permissionMode: base.permissionMode as GrokPermissionMode | undefined,
+            startingMode: 'local',
+            model: target.model ?? undefined,
+            effort: target.effort ?? undefined
+        })
+        return
+    }
+
     if (target.flavor === 'kimi') {
         const { runKimi } = await import('@/kimi/runKimi')
         await runKimi({
@@ -141,6 +146,23 @@ async function dispatchLocalResume(target: LocalResumeTarget): Promise<void> {
             permissionMode: base.permissionMode as KimiPermissionMode | undefined,
             startingMode: 'local',
             model: target.model ?? undefined
+        })
+        return
+    }
+
+    if (target.flavor === 'pi') {
+        const { runPi } = await import('@/pi/runPi')
+        await runPi({
+            existingSessionId: base.existingSessionId,
+            workingDirectory: base.workingDirectory,
+            resumeSessionId: base.resumeSessionId,
+            startedBy: base.startedBy,
+            // Pi runs as `pi --mode rpc` with piped stdio and no local TUI input
+            // path, so 'local' would advertise local-control that cannot be used
+            // and hide/reject remote-only controls until a web switch.
+            startingMode: 'remote',
+            model: target.model ?? undefined,
+            effort: target.effort ?? undefined,
         })
         return
     }
@@ -191,6 +213,14 @@ export const resumeCommand: CommandDefinition = {
 
             assertTargetMachine(target, machineId)
             assertDirectoryExists(target)
+
+            // Gemini CLI is no longer launchable (Google sunset the consumer
+            // Gemini CLI on 2026-06-18). Reject BEFORE the handoff below so an
+            // active Gemini session is left running/readable rather than being
+            // stopped by handoffSessionToLocal and then failing locally.
+            if (target.flavor === 'gemini') {
+                throw new Error('Gemini CLI is no longer supported and cannot be resumed (Google sunset the consumer Gemini CLI on 2026-06-18). The session history remains viewable in the web UI.')
+            }
 
             if (target.active && target.controlledByUser) {
                 throw new Error('Session is already controlled by a local terminal')

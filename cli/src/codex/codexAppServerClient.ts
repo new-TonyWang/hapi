@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
+import { JsonLineParser } from '@/utils/jsonLineParser';
 import { killProcessByChildProcess } from '@/utils/process';
 import type {
     CollaborationModeListResponse,
@@ -14,10 +15,14 @@ import type {
     ThreadStartResponse,
     ThreadResumeParams,
     ThreadResumeResponse,
+    ThreadForkParams,
+    ThreadForkResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
+    ThreadRollbackParams,
+    ThreadRollbackResponse,
     ThreadCompactStartParams,
     ThreadCompactStartResponse,
     ThreadGoalSetParams,
@@ -106,15 +111,94 @@ function configArgsForProfile(profile: string | undefined): string[] {
     return args;
 }
 
-export class CodexAppServerClient {
+type CodexCommandCandidate = {
+    command: string;
+    source: 'desktop' | 'path';
+    version: number[] | null;
+};
+
+function parseCodexVersion(output: string): number[] | null {
+    const match = /(\d+)\.(\d+)\.(\d+)(?:[-+][^\s]+)?/u.exec(output);
+    if (!match) return null;
+    return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function getCodexVersion(command: string): number[] | null {
+    try {
+        const output = execFileSync(command, ['--version'], {
+            encoding: 'utf8',
+            timeout: 3_000,
+            stdio: ['ignore', 'pipe', 'ignore']
+        });
+        return parseCodexVersion(output);
+    } catch {
+        return null;
+    }
+}
+
+function compareVersion(a: number[] | null, b: number[] | null): number {
+    if (!a && !b) return 0;
+    if (a && !b) return 1;
+    if (!a && b) return -1;
+    for (let index = 0; index < 3; index += 1) {
+        const diff = (a?.[index] ?? 0) - (b?.[index] ?? 0);
+        if (diff !== 0) return diff;
+    }
+    return 0;
+}
+
+function resolveCodexAppServerCommand(): string {
+    if (process.env.HAPI_CODEX_APP_SERVER_BIN) {
+        return process.env.HAPI_CODEX_APP_SERVER_BIN;
+    }
+
+    const candidates: CodexCommandCandidate[] = [{
+        command: 'codex',
+        source: 'path',
+        version: getCodexVersion('codex')
+    }];
+
+    if (process.platform === 'darwin') {
+        const desktopCodex = '/Applications/Codex.app/Contents/Resources/codex';
+        if (existsSync(desktopCodex)) {
+            candidates.push({
+                command: desktopCodex,
+                source: 'desktop',
+                version: getCodexVersion(desktopCodex)
+            });
+        }
+    }
+
+    // 中文注释：Codex Desktop 与 npm CLI 都可能写 thread-store；恢复时选择版本更新的 app-server，
+    // 避免旧 CLI 读取新 rollout 格式失败。版本相同优先 Desktop，和用户看到的 Codex.app 保持一致。
+    const best = candidates.sort((left, right) => {
+        const versionDiff = compareVersion(right.version, left.version);
+        if (versionDiff !== 0) return versionDiff;
+        if (left.source === right.source) return 0;
+        return left.source === 'desktop' ? -1 : 1;
+    })[0];
+
+    logger.debug('[CodexAppServer] Resolved codex command', {
+        selected: best.command,
+        candidates: candidates.map((candidate) => ({
+            command: candidate.command,
+            source: candidate.source,
+            version: candidate.version?.join('.') ?? null
+        }))
+    });
+    return best.command;
+}
+
+export class CodexAppServerClient extends JsonLineParser {
     private process: ChildProcessWithoutNullStreams | null = null;
 
     constructor(
         private readonly codexProfile?: string,
         private readonly codexProvider?: string
-    ) {}
+    ) {
+        super();
+    }
     private connected = false;
-    private buffer = '';
     private nextId = 1;
     private readonly pending = new Map<number, PendingRequest>();
     private readonly requestHandlers = new Map<string, RequestHandler>();
@@ -133,12 +217,14 @@ export class CodexAppServerClient {
             return;
         }
 
+        const codexCommand = resolveCodexAppServerCommand();
+        logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
         const args = [
             'app-server',
             ...configArgsForProfile(this.codexProfile),
             ...(this.codexProvider ? ['-c', `model_provider=${JSON.stringify(this.codexProvider)}`] : [])
         ];
-        this.process = spawn('codex', args, {
+        this.process = spawn(codexCommand, args, {
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];
                 if (typeof value === 'string') acc[key] = value;
@@ -150,7 +236,7 @@ export class CodexAppServerClient {
         });
 
         this.process.stdout.setEncoding('utf8');
-        this.process.stdout.on('data', (chunk) => this.handleStdout(chunk));
+        this.process.stdout.on('data', (chunk) => this.feed(chunk));
 
         this.process.stderr.setEncoding('utf8');
         this.process.stderr.on('data', (chunk) => {
@@ -239,6 +325,14 @@ export class CodexAppServerClient {
         return response as ThreadResumeResponse;
     }
 
+    async forkThread(params: ThreadForkParams, options?: { signal?: AbortSignal }): Promise<ThreadForkResponse> {
+        const response = await this.sendRequest('thread/fork', params, {
+            signal: options?.signal,
+            timeoutMs: CodexAppServerClient.DEFAULT_TIMEOUT_MS
+        });
+        return response as ThreadForkResponse;
+    }
+
     async startTurn(params: TurnStartParams, options?: { signal?: AbortSignal }): Promise<TurnStartResponse> {
         const response = await this.sendRequest('turn/start', params, {
             signal: options?.signal,
@@ -252,6 +346,18 @@ export class CodexAppServerClient {
             timeoutMs: 30_000
         });
         return response as TurnInterruptResponse;
+    }
+
+    /**
+     * Deprecated upstream, but still required to match Codex's native
+     * safety-buffering retry flow. Keep the protocol call isolated here so it
+     * can be replaced when app-server exposes a successor.
+     */
+    async rollbackThread(params: ThreadRollbackParams): Promise<ThreadRollbackResponse> {
+        const response = await this.sendRequest('thread/rollback', params, {
+            timeoutMs: 30_000
+        });
+        return response as ThreadRollbackResponse;
     }
 
     async compactThread(
@@ -401,23 +507,7 @@ export class CodexAppServerClient {
         this.writePayload(payload);
     }
 
-    private handleStdout(chunk: string): void {
-        this.buffer += chunk;
-        let newlineIndex = this.buffer.indexOf('\n');
-
-        while (newlineIndex >= 0) {
-            const line = this.buffer.slice(0, newlineIndex).trim();
-            this.buffer = this.buffer.slice(newlineIndex + 1);
-
-            if (line.length > 0) {
-                this.handleLine(line);
-            }
-
-            newlineIndex = this.buffer.indexOf('\n');
-        }
-    }
-
-    private handleLine(line: string): void {
+    protected handleLine(line: string): void {
         if (this.protocolError) {
             return;
         }
@@ -529,7 +619,7 @@ export class CodexAppServerClient {
     }
 
     private resetParserState(): void {
-        this.buffer = '';
+        this.reset();
         this.protocolError = null;
     }
 

@@ -16,6 +16,11 @@ const LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS = 1_000_000
 // Fallback for Codex sessions when the server has not reported an explicit modelContextWindow.
 // The value matches the context window currently reported by Codex App Server token-count events.
 const DEFAULT_CODEX_CONTEXT_WINDOW_TOKENS = 258_400
+// Pi supports multiple providers with varying context windows. 200K is a
+// conservative default (most Claude/GPT-4 class models). When the server
+// reports an explicit modelContextWindow via usage events, that takes
+// precedence over this fallback.
+const DEFAULT_PI_CONTEXT_WINDOW_TOKENS = 200_000
 
 function parseCursorWireContextWindow(model: string): number | null {
     const match = model.match(/\[([^\]]+)\]/)
@@ -47,6 +52,10 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
         return Math.max(1, DEFAULT_CODEX_CONTEXT_WINDOW_TOKENS - CONTEXT_HEADROOM_TOKENS)
     }
 
+    if (flavor === 'pi') {
+        return Math.max(1, DEFAULT_PI_CONTEXT_WINDOW_TOKENS - CONTEXT_HEADROOM_TOKENS)
+    }
+
     if (flavor === 'cursor') {
         const trimmedModel = model?.trim()
         const windowTokens = trimmedModel ? parseCursorWireContextWindow(trimmedModel) : null
@@ -65,13 +74,10 @@ export function getContextBudgetTokens(model: string | null | undefined, flavor?
         if (!trimmedModel) {
             return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
         }
-        if (isClaudeModelPreset(trimmedModel)) {
+        if (isClaudeModelPreset(trimmedModel) || trimmedModel.startsWith('claude-')) {
             return trimmedModel.endsWith('[1m]')
                 ? LARGE_CLAUDE_CONTEXT_WINDOW_TOKENS
                 : DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
-        }
-        if (trimmedModel.startsWith('claude-')) {
-            return DEFAULT_CLAUDE_CONTEXT_WINDOW_TOKENS
         }
         return null
     })()

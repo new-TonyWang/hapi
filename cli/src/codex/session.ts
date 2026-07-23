@@ -20,6 +20,7 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
     readonly replayTranscriptHistoryOnStart: boolean;
+    readonly sourceSessionId?: string;
     localLaunchFailure: LocalLaunchFailure | null = null;
 
     private transcriptPathCallbacks: Array<(path: string) => void> = [];
@@ -44,6 +45,7 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         modelReasoningEffort?: SessionModelReasoningEffort;
         collaborationMode?: EnhancedMode['collaborationMode'];
         replayTranscriptHistoryOnStart?: boolean;
+        sourceSessionId?: string;
     }) {
         super({
             api: opts.api,
@@ -73,6 +75,7 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         this.startedBy = opts.startedBy;
         this.startingMode = opts.startingMode;
         this.replayTranscriptHistoryOnStart = opts.replayTranscriptHistoryOnStart ?? false;
+        this.sourceSessionId = opts.sourceSessionId;
         this.permissionMode = opts.permissionMode;
         this.model = opts.model;
         this.modelReasoningEffort = opts.modelReasoningEffort;
@@ -148,6 +151,10 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
 
     sendUserMessage = (text: string): void => {
         this.client.sendUserMessage(text);
+    };
+
+    notifyUserActivity = (): void => {
+        this.client.notifyUserActivity();
     };
 
     sendSessionEvent = (event: Parameters<ApiSessionClient['sendSessionEvent']>[0]): void => {

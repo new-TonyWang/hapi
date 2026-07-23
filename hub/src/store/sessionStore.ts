@@ -11,6 +11,8 @@ import {
     setSessionEffort,
     setSessionModel,
     setSessionModelReasoningEffort,
+    setSessionServiceTier,
+    setSessionActive,
     setSessionTeamState,
     setSessionTodos,
     touchSessionUpdatedAt,
@@ -32,9 +34,10 @@ export class SessionStore {
         namespace: string,
         model?: string,
         effort?: string,
-        modelReasoningEffort?: string
+        modelReasoningEffort?: string,
+        requestedId?: string
     ): StoredSession {
-        return getOrCreateSession(this.db, tag, metadata, agentState, namespace, model, effort, modelReasoningEffort)
+        return getOrCreateSession(this.db, tag, metadata, agentState, namespace, model, effort, modelReasoningEffort, requestedId)
     }
 
     updateSessionMetadata(
@@ -79,6 +82,14 @@ export class SessionStore {
 
     setSessionEffort(id: string, effort: string | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {
         return setSessionEffort(this.db, id, effort, namespace, options)
+    }
+
+    setSessionServiceTier(id: string, serviceTier: string | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {
+        return setSessionServiceTier(this.db, id, serviceTier, namespace, options)
+    }
+
+    setSessionActive(id: string, active: boolean, activeAt: number, namespace: string): boolean {
+        return setSessionActive(this.db, id, active, activeAt, namespace)
     }
 
     touchSessionUpdatedAt(id: string, updatedAt: number, namespace: string): boolean {

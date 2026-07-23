@@ -3,7 +3,8 @@ import type { Session } from '@/types/api'
 
 /** Agent thread id used by hub `resolveAgentResumeId`, flavor-specific.
  *  Mirrors hub: cross-flavor ids are ignored to avoid the web layer claiming a
- *  session is resumable when the hub will only honor the current flavor's id. */
+ *  session is resumable when the hub will only honor the current flavor's id.
+ */
 export function resolveAgentSessionIdFromMetadata(
     metadata: Session['metadata'] | null | undefined,
 ): string | undefined {
@@ -15,8 +16,10 @@ export function resolveAgentSessionIdFromMetadata(
         case 'codex': return metadata.codexSessionId ?? undefined
         case 'gemini': return metadata.geminiSessionId ?? undefined
         case 'opencode': return metadata.opencodeSessionId ?? undefined
+        case 'grok': return metadata.grokSessionId ?? undefined
         case 'cursor': return metadata.cursorSessionId ?? undefined
         case 'kimi': return metadata.kimiSessionId ?? undefined
+        case 'pi': return metadata.piSessionId ?? undefined
         default: return metadata.claudeSessionId ?? undefined
     }
 }
@@ -31,6 +34,7 @@ export function resolveAgentSessionIdFromMetadata(
 export function inactiveSessionCanResume(
     session: Session,
     userMessageCount: number,
+    cursorChatOnDisk?: boolean,
 ): boolean {
     if (session.active) {
         return true
@@ -39,6 +43,10 @@ export function inactiveSessionCanResume(
         return false
     }
     if (resolveAgentSessionIdFromMetadata(session.metadata)) {
+        const flavor = isKnownFlavor(session.metadata.flavor) ? session.metadata.flavor : 'claude'
+        if (flavor === 'cursor') {
+            return cursorChatOnDisk === true
+        }
         return true
     }
     const flavor = isKnownFlavor(session.metadata.flavor) ? session.metadata.flavor : 'claude'
