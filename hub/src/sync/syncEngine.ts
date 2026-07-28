@@ -29,6 +29,7 @@ import {
     type RpcDeleteUploadResponse,
     type RpcGeneratedImageResponse,
     type RpcListDirectoryResponse,
+    type RpcStatFilesResponse,
     type RpcListCodexModelsResponse,
     type RpcArchiveCodexSessionResponse,
     type RpcListCursorModelsResponse,
@@ -54,6 +55,7 @@ export type {
     RpcDeleteUploadResponse,
     RpcGeneratedImageResponse,
     RpcListDirectoryResponse,
+    RpcStatFilesResponse,
     RpcListCodexModelsResponse,
     RpcListCursorModelsResponse,
     RpcListOpencodeModelsResponse,
@@ -844,7 +846,9 @@ export class SyncEngine {
         }
 
         const flavor = this.resolveFlavor(session)
-        if (flavor === 'codex') return metadata.codexSessionId ?? null
+        if (flavor === 'codex') {
+            return metadata.codexSessionId ?? this.recoverCodexSessionIdFromMessages(session.id, namespace)
+        }
         if (flavor === 'gemini') return metadata.geminiSessionId ?? null
         if (flavor === 'opencode') return metadata.opencodeSessionId ?? null
         if (flavor === 'grok') return metadata.grokSessionId ?? null
@@ -1505,10 +1509,60 @@ export class SyncEngine {
             const found = this.extractClaudeSessionId(messages[i].content)
             if (!found) continue
 
-            this.persistRecoveredClaudeSessionId(sessionId, namespace, found)
-            return found
+            return this.persistRecoveredAgentSessionId(sessionId, namespace, 'claudeSessionId', found)
         }
         return null
+    }
+
+    private recoverCodexSessionIdFromMessages(sessionId: string, namespace: string): string | null {
+        const messages = this.messageService.getMessages(sessionId, 200)
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+            const content = messages[i].content
+            if (this.isCodexContextResetMessage(content)) return null
+
+            const found = this.extractCodexParentThreadId(content)
+            if (!found) continue
+
+            return this.persistRecoveredAgentSessionId(sessionId, namespace, 'codexSessionId', found)
+        }
+        return null
+    }
+
+    private isCodexContextResetMessage(value: unknown): boolean {
+        const message = asRecord(value)
+        const content = asRecord(message?.content)
+        const event = asRecord(content?.data)
+        return message?.role === 'agent'
+            && content?.type === 'event'
+            && event?.type === 'message'
+            && event.message === 'Context was reset'
+    }
+
+    private extractCodexParentThreadId(value: unknown): string | null {
+        const message = asRecord(value)
+        const content = asRecord(message?.content)
+        const event = asRecord(content?.data)
+        if (message?.role !== 'agent' || content?.type !== 'codex' || !event) {
+            return null
+        }
+
+        const scope = asRecord(event.scope)
+        const roles = [event.scope_role, event.scopeRole, scope?.role]
+            .filter((role) => role !== undefined)
+        if (roles.length === 0 || roles.some((role) => role !== 'parent')) {
+            return null
+        }
+
+        const threadIds: string[] = []
+        for (const threadId of [event.thread_id, event.threadId, scope?.thread_id, scope?.threadId]) {
+            if (threadId === undefined) continue
+
+            const normalized = this.normalizeAgentSessionId(threadId)
+            if (!normalized) return null
+            threadIds.push(normalized)
+        }
+        const uniqueThreadIds = [...new Set(threadIds)]
+        return uniqueThreadIds.length === 1 ? uniqueThreadIds[0] : null
     }
 
     private extractClaudeSessionId(value: unknown): string | null {
@@ -1517,7 +1571,7 @@ export class SyncEngine {
         }
 
         const obj = value as Record<string, unknown>
-        const direct = this.normalizeClaudeSessionId(obj.session_id) ?? this.normalizeClaudeSessionId(obj.sessionId)
+        const direct = this.normalizeAgentSessionId(obj.session_id) ?? this.normalizeAgentSessionId(obj.sessionId)
         if (direct) {
             return direct
         }
@@ -1537,7 +1591,7 @@ export class SyncEngine {
         return null
     }
 
-    private normalizeClaudeSessionId(value: unknown): string | null {
+    private normalizeAgentSessionId(value: unknown): string | null {
         if (typeof value !== 'string') {
             return null
         }
@@ -1547,28 +1601,45 @@ export class SyncEngine {
             : null
     }
 
-    private persistRecoveredClaudeSessionId(sessionId: string, namespace: string, claudeSessionId: string): void {
+    private persistRecoveredAgentSessionId(
+        sessionId: string,
+        namespace: string,
+        field: 'claudeSessionId' | 'codexSessionId',
+        agentSessionId: string
+    ): string {
         for (let attempt = 0; attempt < 2; attempt += 1) {
             const latest = this.sessionCache.getSessionByNamespace(sessionId, namespace)
                 ?? this.sessionCache.refreshSession(sessionId)
-            if (!latest?.metadata) return
-            if (latest.metadata.claudeSessionId === claudeSessionId) return
+            if (!latest?.metadata) return agentSessionId
+
+            const existingAgentSessionId = latest.metadata[field]
+            if (typeof existingAgentSessionId === 'string') {
+                return existingAgentSessionId
+            }
 
             const result = this.store.sessions.updateSessionMetadata(
                 sessionId,
-                { ...latest.metadata, claudeSessionId },
+                { ...latest.metadata, [field]: agentSessionId },
                 latest.metadataVersion,
                 namespace,
                 { touchUpdatedAt: false }
             )
             if (result.result === 'success') {
                 this.sessionCache.refreshSession(sessionId)
-                return
+                return agentSessionId
             }
             if (result.result !== 'version-mismatch') {
-                return
+                return agentSessionId
+            }
+
+            this.sessionCache.refreshSession(sessionId)
+            const refreshed = this.sessionCache.getSessionByNamespace(sessionId, namespace)
+            const authoritativeAgentSessionId = refreshed?.metadata?.[field]
+            if (typeof authoritativeAgentSessionId === 'string') {
+                return authoritativeAgentSessionId
             }
         }
+        return agentSessionId
     }
 
     private hasSameAgentSessionIds(
@@ -1678,6 +1749,10 @@ export class SyncEngine {
         return await this.rpcGateway.listDirectory(sessionId, path)
     }
 
+    async statFiles(sessionId: string, paths: string[]): Promise<RpcStatFilesResponse> {
+        return await this.rpcGateway.statFiles(sessionId, paths)
+    }
+
     async uploadFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<RpcUploadFileResponse> {
         return await this.rpcGateway.uploadFile(sessionId, filename, content, mimeType)
     }
@@ -1700,10 +1775,6 @@ export class SyncEngine {
         error?: string
     }> {
         return await this.rpcGateway.listSkills(sessionId, flavor)
-    }
-
-    async listCodexModelsForSession(sessionId: string): Promise<RpcListCodexModelsResponse> {
-        return await this.rpcGateway.listCodexModelsForSession(sessionId)
     }
 
     async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {

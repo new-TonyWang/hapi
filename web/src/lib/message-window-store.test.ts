@@ -390,10 +390,10 @@ describe('message-window-store async generations', () => {
         const finalState = getMessageWindowState(SESSION_ID)
         expect(finalState.isLoadingMore).toBe(false)
         expect(callLog).toEqual([
-            { limit: 50 },
-            { beforeAt: 1_700_000_400_000, beforeSeq: 101, limit: 50 },
-            { limit: 50 },
-            { beforeAt: 1_700_000_300_000, beforeSeq: 51, limit: 50 },
+            { limit: 200 },
+            { beforeAt: 1_700_000_400_000, beforeSeq: 101, limit: 200 },
+            { limit: 200 },
+            { beforeAt: 1_700_000_300_000, beforeSeq: 51, limit: 200 },
         ])
     })
 
@@ -438,7 +438,7 @@ describe('message-window-store async generations', () => {
         expect(calls[1]).toEqual({
             beforeAt: 1_700_000_500_000,
             beforeSeq: 11,
-            limit: 50,
+            limit: 200,
         })
     })
 })
@@ -696,6 +696,162 @@ describe('message-window-store visible trimming', () => {
         })
         expect(state.messages.some((message) => message.id === 'main-user-before-agent-flood')).toBe(true)
         expect(state.messages.filter((message) => message.id.startsWith('agent-run-latest-'))).toHaveLength(50)
+    })
+
+    it('keeps backfilling when the newest page renders only agent-run traces and token-count events', async () => {
+        const baseTime = 1_700_000_300_000
+        // Newest 200 rows: 50 agent-run traces + 150 token_count events. Both are
+        // non-rendering in the timeline, so they must not satisfy the backfill floor.
+        const latestPage: DecryptedMessage[] = []
+        for (let i = 0; i < 150; i += 1) {
+            latestPage.push({
+                id: `token-count-${i}`,
+                seq: i + 2,
+                localId: null,
+                content: {
+                    role: 'agent',
+                    content: {
+                        type: 'codex',
+                        data: {
+                            type: 'token_count',
+                            info: { total: { inputTokens: 100 + i, outputTokens: 50 } }
+                        }
+                    }
+                },
+                createdAt: baseTime + i + 2,
+                invokedAt: baseTime + i + 2
+            } as DecryptedMessage)
+        }
+        for (let i = 0; i < 50; i += 1) {
+            latestPage.push(makeAgentRunMessage({
+                id: `agent-run-${i}`,
+                seq: i + 152,
+                createdAt: baseTime + i + 152
+            }))
+        }
+        const mainMessage = makeUserMessage({
+            id: 'main-user-behind-token-flood',
+            seq: 1,
+            text: 'main prompt before token flood',
+            createdAt: baseTime + 1
+        })
+
+        const calls: Array<{ beforeAt?: number | null; beforeSeq?: number | null; limit?: number }> = []
+        const api = {
+            getMessages: async (_sessionId: string, options: { beforeAt?: number | null; beforeSeq?: number | null; limit?: number }) => {
+                calls.push(options)
+                if (calls.length === 1) {
+                    return {
+                        messages: latestPage,
+                        page: {
+                            limit: options.limit ?? 200,
+                            nextBeforeSeq: 2,
+                            nextBeforeAt: baseTime + 2,
+                            hasMore: true
+                        }
+                    }
+                }
+                return {
+                    messages: [mainMessage],
+                    page: {
+                        limit: options.limit ?? 200,
+                        nextBeforeSeq: 1,
+                        nextBeforeAt: baseTime + 1,
+                        hasMore: false
+                    }
+                }
+            }
+        } as Pick<ApiClient, 'getMessages'>
+
+        await fetchLatestMessages(api as ApiClient, SESSION_ID)
+
+        expect(calls).toHaveLength(2)
+        const state = getMessageWindowState(SESSION_ID)
+        expect(state.messages.some((message) => message.id === 'main-user-behind-token-flood')).toBe(true)
+    })
+
+    it('keeps backfilling when tool call/result pairs collapse into fewer rendered cards', async () => {
+        const baseTime = 1_700_000_400_000
+        // Newest 200 rows: 150 agent-run traces + 25 tool-call/result pairs. The
+        // pairs render as 25 cards, well below the backfill floor — raw-row
+        // counting would stop here and hide the root prompt.
+        const latestPage: DecryptedMessage[] = []
+        for (let i = 0; i < 25; i += 1) {
+            latestPage.push({
+                id: `tool-call-${i}`,
+                seq: i * 2 + 2,
+                localId: null,
+                content: {
+                    role: 'agent',
+                    content: {
+                        type: 'codex',
+                        data: { type: 'tool-call', callId: `call-${i}`, name: 'shell', input: {} }
+                    }
+                },
+                createdAt: baseTime + i * 2 + 2,
+                invokedAt: baseTime + i * 2 + 2
+            } as DecryptedMessage)
+            latestPage.push({
+                id: `tool-result-${i}`,
+                seq: i * 2 + 3,
+                localId: null,
+                content: {
+                    role: 'agent',
+                    content: {
+                        type: 'codex',
+                        data: { type: 'tool-call-result', callId: `call-${i}`, output: 'ok', is_error: false }
+                    }
+                },
+                createdAt: baseTime + i * 2 + 3,
+                invokedAt: baseTime + i * 2 + 3
+            } as DecryptedMessage)
+        }
+        for (let i = 0; i < 150; i += 1) {
+            latestPage.push(makeAgentRunMessage({
+                id: `agent-run-${i}`,
+                seq: i + 52,
+                createdAt: baseTime + i + 52
+            }))
+        }
+        const mainMessage = makeUserMessage({
+            id: 'main-user-behind-tool-pairs',
+            seq: 1,
+            text: 'main prompt before tool flood',
+            createdAt: baseTime + 1
+        })
+
+        const calls: Array<{ beforeAt?: number | null; beforeSeq?: number | null; limit?: number }> = []
+        const api = {
+            getMessages: async (_sessionId: string, options: { beforeAt?: number | null; beforeSeq?: number | null; limit?: number }) => {
+                calls.push(options)
+                if (calls.length === 1) {
+                    return {
+                        messages: latestPage,
+                        page: {
+                            limit: options.limit ?? 200,
+                            nextBeforeSeq: 2,
+                            nextBeforeAt: baseTime + 2,
+                            hasMore: true
+                        }
+                    }
+                }
+                return {
+                    messages: [mainMessage],
+                    page: {
+                        limit: options.limit ?? 200,
+                        nextBeforeSeq: 1,
+                        nextBeforeAt: baseTime + 1,
+                        hasMore: false
+                    }
+                }
+            }
+        } as Pick<ApiClient, 'getMessages'>
+
+        await fetchLatestMessages(api as ApiClient, SESSION_ID)
+
+        expect(calls).toHaveLength(2)
+        const state = getMessageWindowState(SESSION_ID)
+        expect(state.messages.some((message) => message.id === 'main-user-behind-tool-pairs')).toBe(true)
     })
 
     it('drops a stale queued ghost on at-bottom refresh when the server no longer reports it as queued', async () => {

@@ -423,6 +423,10 @@ export class ApiSessionClient extends EventEmitter {
         return this.state
     }
 
+    getMetadata(): Readonly<Metadata> | null {
+        return this.metadata
+    }
+
     isPending(): boolean {
         return this.state === 'pending' || this.state === 'materializing'
     }

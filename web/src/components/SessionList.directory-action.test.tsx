@@ -7,7 +7,10 @@ import { I18nProvider } from '@/lib/i18n-context'
 import { ToastProvider } from '@/lib/toast-context'
 import { SessionList } from './SessionList'
 
-afterEach(() => cleanup())
+afterEach(() => {
+    cleanup()
+    localStorage.removeItem('hapi-session-preview-limit')
+})
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
     return {
@@ -143,8 +146,13 @@ describe('SessionList time filter', () => {
         expect(screen.getByRole('button', { name: /Old session/ })).toBeInTheDocument()
 
         fireEvent.click(screen.getByRole('button', { name: 'Filter sessions by last activity' }))
-        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 17).toLocaleDateString() }))
-        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 18).toLocaleDateString() }))
+        const emptyDate = screen.getByRole('button', { name: new Date(2026, 6, 17).toLocaleDateString() })
+        const activeDate = screen.getByRole('button', { name: `${new Date(2026, 6, 18).toLocaleDateString()}, has session activity` })
+        expect(emptyDate).toHaveClass('text-[var(--app-hint)]')
+        expect(activeDate).toHaveClass('text-[var(--app-fg)]')
+        expect(activeDate).toHaveAttribute('title', `${new Date(2026, 6, 18).toLocaleDateString()}, has session activity`)
+        fireEvent.click(emptyDate)
+        fireEvent.click(activeDate)
 
         expect(screen.getByRole('button', { name: /Recent session/ })).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /Old session/ })).toBeNull()
@@ -174,7 +182,7 @@ describe('SessionList time filter', () => {
         fireEvent.click(filterButton)
         fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 1).toLocaleDateString() }))
         expect(screen.getByText('Select end date')).toBeInTheDocument()
-        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 18).toLocaleDateString() }))
+        fireEvent.click(screen.getByRole('button', { name: `${new Date(2026, 6, 18).toLocaleDateString()}, has session activity` }))
 
         expect(filterButton).toHaveAttribute('aria-expanded', 'false')
         expect(filterButton).toHaveAttribute('title', '2026-07-01 – 2026-07-18')
@@ -220,7 +228,7 @@ describe('SessionList action menu parity', () => {
 })
 
 describe('SessionList collapse behavior', () => {
-    function renderSessionList(sessions: SessionSummary[], selectedSessionId = 'session-running') {
+    function renderSessionList(sessions: SessionSummary[], selectedSessionId: string | null = 'session-running') {
         return (
             <QueryClientProvider client={new QueryClient({
                 defaultOptions: {
@@ -315,5 +323,58 @@ describe('SessionList collapse behavior', () => {
         await waitFor(() => {
             expect(getProjectPanel().getAttribute('data-open')).toBe('true')
         })
+    })
+
+    it('keeps the previous selected path open when selection moves', async () => {
+        const sessions = [
+            makeSession({
+                id: 'session-first',
+                updatedAt: 100,
+                metadata: { path: '/work/first', name: 'First task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-second',
+                updatedAt: 90,
+                metadata: { path: '/work/second', name: 'Second task', flavor: 'codex' },
+            })
+        ]
+        const { rerender } = render(renderSessionList(sessions, 'session-first'))
+        const firstPanel = screen.getByTitle('/work/first').nextElementSibling
+
+        expect(firstPanel?.getAttribute('data-open')).toBe('true')
+
+        rerender(renderSessionList(sessions, 'session-second'))
+
+        await waitFor(() => {
+            expect(firstPanel?.getAttribute('data-open')).toBe('true')
+        })
+    })
+
+    it('keeps the configured session preview fold while searching', () => {
+        localStorage.setItem('hapi-session-preview-limit', '2')
+        const sessions = Array.from({ length: 4 }, (_, index) => makeSession({
+            id: `matching-${index + 1}`,
+            updatedAt: 100 - index,
+            metadata: {
+                path: '/work/hapi',
+                name: `Matching task ${index + 1}`,
+                flavor: 'codex',
+            },
+        }))
+
+        render(renderSessionList(sessions, null))
+        fireEvent.change(screen.getByPlaceholderText('Search sessions…'), {
+            target: { value: 'Matching task' },
+        })
+
+        expect(screen.getByRole('button', { name: /Matching task 1/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Matching task 2/ })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Matching task 3/ })).toBeNull()
+        expect(screen.queryByRole('button', { name: /Matching task 4/ })).toBeNull()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Show 2 more' }))
+
+        expect(screen.getByRole('button', { name: /Matching task 3/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Matching task 4/ })).toBeInTheDocument()
     })
 })

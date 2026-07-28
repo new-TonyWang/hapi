@@ -83,6 +83,56 @@ function visibleBlockRole(block: VisibleChatBlock): VisibleChatBlockRole {
     return 'assistant'
 }
 
+export function getBlockPresentationTimestamp(block: VisibleChatBlock): number {
+    if (visibleBlockRole(block) === 'user') {
+        return block.invokedAt ?? block.createdAt
+    }
+    if (block.kind === 'tool-group') {
+        return block.tools.reduce(
+            (latest, tool) => Math.max(latest, tool.tool.completedAt ?? tool.createdAt),
+            block.createdAt
+        )
+    }
+    if (block.kind === 'tool-call') {
+        return Math.max(block.createdAt, block.tool.completedAt ?? block.createdAt)
+    }
+    return block.createdAt
+}
+
+/**
+ * `@assistant-ui/react` joins adjacent assistant-role blocks into one card and
+ * takes its timestamp from the first block. Use the response's final activity
+ * time so prepending an older page cannot change an existing card's timestamp.
+ */
+export function getResponseGroupTimestamps(
+    blocks: readonly VisibleChatBlock[]
+): Map<VisibleChatBlock, number> {
+    const timestamps = new Map<VisibleChatBlock, number>()
+    let first: VisibleChatBlock | null = null
+    let latestTimestamp = 0
+
+    const flush = () => {
+        if (first) timestamps.set(first, latestTimestamp)
+        first = null
+    }
+
+    for (const block of blocks) {
+        if (visibleBlockRole(block) !== 'assistant') {
+            flush()
+            continue
+        }
+        const timestamp = getBlockPresentationTimestamp(block)
+        if (!first) {
+            first = block
+            latestTimestamp = timestamp
+        } else {
+            latestTimestamp = Math.max(latestTimestamp, timestamp)
+        }
+    }
+    flush()
+    return timestamps
+}
+
 type TurnSource = {
     localId: string | null
     invokedAt: number | null
@@ -318,12 +368,16 @@ export function assignThreadMessageIds(
     return assignThreadMessageIdsWithStableWrappers(blocks, new WeakMap())
 }
 
-function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): ThreadMessageLike {
+function toThreadMessageLike(
+    block: VisibleChatBlock,
+    threadMessageId: string,
+    timestamp: number
+): ThreadMessageLike {
     if (block.kind === 'user-text') {
         return {
             role: 'user',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: block.text }],
             metadata: {
                 custom: {
@@ -342,7 +396,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: block.text }],
             metadata: {
                 custom: {
@@ -360,7 +414,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{
                 type: 'tool-call',
                 toolCallId: block.id,
@@ -382,7 +436,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'reasoning', text: block.text }],
             metadata: {
                 custom: {
@@ -400,7 +454,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: formatCodexReviewText(block.review) }],
             metadata: {
                 custom: {
@@ -419,7 +473,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'system',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: renderEventLabel(block.event) }],
             metadata: {
                 custom: {
@@ -436,7 +490,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: block.source === 'user' ? 'user' : 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: block.text }],
             metadata: {
                 custom: {
@@ -456,7 +510,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(groupBlock.createdAt),
+            createdAt: new Date(timestamp),
             content: [{
                 type: 'tool-call',
                 toolCallId: groupBlock.id,
@@ -480,7 +534,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
     return {
         role: 'assistant',
         id: threadMessageId,
-        createdAt: new Date(toolBlock.createdAt),
+        createdAt: new Date(timestamp),
         content: [{
             type: 'tool-call',
             toolCallId: toolBlock.id,
@@ -591,10 +645,18 @@ export function useHappyRuntime(props: {
         () => aggregateResponseGroups(props.blocks),
         [props.blocks]
     )
+    const responseGroupTimestamps = useMemo(
+        () => getResponseGroupTimestamps(props.blocks),
+        [props.blocks]
+    )
 
     const convertBlock = useCallback(
         ({ block, threadMessageId }: BlockWithThreadMessageId): ThreadMessageLike => {
-            const message = toThreadMessageLike(block, threadMessageId)
+            const message = toThreadMessageLike(
+                block,
+                threadMessageId,
+                responseGroupTimestamps.get(block) ?? getBlockPresentationTimestamp(block)
+            )
             const aggregate = aggregates.get(block.id)
             if (!aggregate) return message
             const existing = message.metadata?.custom as HappyChatMessageMetadata | undefined
@@ -613,7 +675,7 @@ export function useHappyRuntime(props: {
                 }
             }
         },
-        [aggregates]
+        [aggregates, responseGroupTimestamps]
     )
 
     // Use cached message converter for performance optimization

@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ThreadPrimitive } from '@assistant-ui/react'
 import type { ApiClient } from '@/api/client'
 import type { SessionMetadataSummary } from '@/types/api'
 import type { ConversationOutlineItem } from '@/chat/outline'
 import { getConversationMessageAnchorId } from '@/chat/outline'
+import { formatMessageTimestampTitle, formatOutlineTimestamp } from '@/chat/presentation'
 import { HappyChatProvider } from '@/components/AssistantChat/context'
 import { HappyAssistantMessage } from '@/components/AssistantChat/messages/AssistantMessage'
 import { HappyUserMessage } from '@/components/AssistantChat/messages/UserMessage'
@@ -13,6 +14,7 @@ import { Spinner } from '@/components/Spinner'
 import { useTerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { useTranslation } from '@/lib/use-translation'
 import { CloseIcon } from '@/components/icons'
+import { ShareTurnDialog } from '@/components/AssistantChat/ShareTurnDialog'
 
 type ScrollAnchor = {
     id: string
@@ -23,6 +25,57 @@ type PendingScrollRestore = {
     anchor: ScrollAnchor | null
     scrollTop: number
     scrollHeight: number
+}
+
+type ShareTurnState = {
+    id: number
+    snapshots: ShareTurnSnapshot[]
+    title: string
+    subtitle: string
+} | null
+
+type ShareTurnSnapshot = {
+    html: string
+    text: string
+    role?: 'user' | 'assistant'
+}
+
+function findNearestMessageElement(content: HTMLElement, clientY?: number): HTMLElement | null {
+    const messages = Array.from(content.querySelectorAll('.happy-thread-messages > [id]'))
+        .filter((element): element is HTMLElement => element instanceof HTMLElement)
+    if (messages.length === 0) return null
+    if (typeof clientY !== 'number' || !Number.isFinite(clientY)) {
+        return messages[messages.length - 1] ?? null
+    }
+
+    let best: HTMLElement | null = null
+    let bestDistance = Number.POSITIVE_INFINITY
+    for (const message of messages) {
+        const rect = message.getBoundingClientRect()
+        const distance = clientY < rect.top
+            ? rect.top - clientY
+            : clientY > rect.bottom
+                ? clientY - rect.bottom
+                : 0
+        if (distance < bestDistance) {
+            best = message
+            bestDistance = distance
+        }
+    }
+    return best
+}
+
+export function prependMissingUserSnapshot(
+    snapshots: ShareTurnSnapshot[],
+    fallbackSnapshot?: ShareTurnSnapshot
+): ShareTurnSnapshot[] {
+    const hasUser = snapshots.some((snapshot) =>
+        snapshot.role === 'user' || snapshot.html.includes('data-hapi-message-role="user"')
+    )
+    if (hasUser || fallbackSnapshot?.role !== 'user' || fallbackSnapshot.text.trim().length === 0) {
+        return snapshots
+    }
+    return [fallbackSnapshot, ...snapshots]
 }
 
 const MESSAGE_ANCHOR_SELECTOR = '.happy-thread-messages > [id]'
@@ -149,7 +202,6 @@ const THREAD_MESSAGE_COMPONENTS = {
 } as const
 
 export function ConversationOutlinePanel(props: {
-    title: string
     items: readonly ConversationOutlineItem[]
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
@@ -157,77 +209,120 @@ export function ConversationOutlinePanel(props: {
     onSelect: (item: ConversationOutlineItem) => void
     onClose: () => void
 }) {
-    const { t } = useTranslation()
+    const { t, locale } = useTranslation()
+    const [searchQuery, setSearchQuery] = useState('')
+    const normalizedSearchQuery = searchQuery.trim().toLocaleLowerCase()
+    const filteredItems = useMemo(() => {
+        if (normalizedSearchQuery.length === 0) {
+            return props.items
+        }
+        return props.items.filter((item) => (
+            item.label.toLocaleLowerCase().includes(normalizedSearchQuery)
+        ))
+    }, [normalizedSearchQuery, props.items])
 
     return (
         <aside
             className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[24rem] flex-col border-l border-[var(--app-border)] bg-[var(--app-bg)] shadow-2xl sm:w-[24rem]"
             aria-label={t('session.outline.title')}
         >
-            <div className="flex items-start gap-3 border-b border-[var(--app-border)] p-3">
-                <div className="min-w-0 flex-1">
-                    <div className="text-sm font-semibold">{t('session.outline.title')}</div>
-                    <div className="mt-0.5 truncate text-xs text-[var(--app-hint)]">{props.title}</div>
-                </div>
-                <button
-                    type="button"
-                    onClick={props.onClose}
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
-                    aria-label={t('button.close')}
-                    title={t('button.close')}
-                >
-                    <CloseIcon className="h-4 w-4" />
-                </button>
-            </div>
-
-            {props.hasMoreMessages ? (
-                <div className="border-b border-[var(--app-border)] p-3">
-                    <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={props.onLoadMore}
-                        disabled={props.isLoadingMoreMessages}
-                        aria-busy={props.isLoadingMoreMessages}
-                        className="w-full gap-1.5 text-xs"
-                    >
-                        {props.isLoadingMoreMessages ? (
-                            <>
+            <div className="border-b border-[var(--app-border)] p-3">
+                <div className="flex items-center gap-2">
+                    <div className="relative min-w-0 flex-1">
+                        <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            width="16"
+                            height="16"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--app-hint)]"
+                            aria-hidden="true"
+                        >
+                            <circle cx="11" cy="11" r="8" />
+                            <path d="m21 21-4.3-4.3" />
+                        </svg>
+                        <input
+                            type="search"
+                            value={searchQuery}
+                            onChange={(event) => setSearchQuery(event.target.value)}
+                            placeholder={t('session.outline.searchPlaceholder')}
+                            aria-label={t('session.outline.searchLabel')}
+                            className="h-9 w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] py-2 pl-9 pr-3 text-sm text-[var(--app-fg)] outline-none placeholder:text-[var(--app-hint)] focus:border-[var(--app-link)] focus:ring-1 focus:ring-[var(--app-link)]"
+                        />
+                    </div>
+                    {props.hasMoreMessages ? (
+                        <Button
+                            variant="outline"
+                            onClick={props.onLoadMore}
+                            disabled={props.isLoadingMoreMessages}
+                            aria-busy={props.isLoadingMoreMessages}
+                            aria-label={props.isLoadingMoreMessages ? t('misc.loading') : t('session.outline.loadOlder')}
+                            title={props.isLoadingMoreMessages ? t('misc.loading') : t('session.outline.loadOlder')}
+                            className="h-9 w-9 shrink-0 px-0"
+                        >
+                            {props.isLoadingMoreMessages ? (
                                 <Spinner size="sm" label={null} className="text-current" />
-                                {t('misc.loading')}
-                            </>
-                        ) : (
-                            <>
-                                <span aria-hidden="true">↑</span>
-                                {t('session.outline.loadOlder')}
-                            </>
-                        )}
-                    </Button>
+                            ) : (
+                                <span className="text-base leading-none" aria-hidden="true">↑</span>
+                            )}
+                        </Button>
+                    ) : null}
+                    <button
+                        type="button"
+                        onClick={props.onClose}
+                        aria-label={t('button.close')}
+                        title={t('button.close')}
+                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                    >
+                        <CloseIcon className="h-4 w-4" />
+                    </button>
                 </div>
-            ) : null}
+                {normalizedSearchQuery.length > 0 ? (
+                    <div className="mt-1.5 text-right text-xs text-[var(--app-hint)]" aria-live="polite">
+                        {t('session.outline.searchResults', {
+                            matched: filteredItems.length,
+                            total: props.items.length
+                        })}
+                    </div>
+                ) : null}
+            </div>
 
             <div className="app-scroll-y min-h-0 flex-1 p-2">
                 {props.items.length === 0 ? (
                     <div className="px-2 py-8 text-center text-sm text-[var(--app-hint)]">
                         {t('session.outline.empty')}
                     </div>
+                ) : filteredItems.length === 0 ? (
+                    <div className="px-2 py-8 text-center text-sm text-[var(--app-hint)]">
+                        {t('session.outline.noSearchResults')}
+                    </div>
                 ) : (
                     <div className="space-y-1">
-                        {props.items.map((item) => {
+                        {filteredItems.map((item) => {
+                            const createdAt = new Date(item.createdAt)
                             return (
                                 <button
                                     key={item.id}
                                     type="button"
                                     onClick={() => props.onSelect(item)}
-                                    className="group flex w-full min-w-0 items-start gap-2 rounded-md px-2 py-2 text-left transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                                    className="group block w-full min-w-0 rounded-md px-2 py-2 text-left transition-colors hover:bg-[var(--app-subtle-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
                                 >
-                                    <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-[var(--app-button)]" aria-hidden="true" />
-                                    <span className="min-w-0 flex-1">
-                                        <span className="block truncate text-[11px] font-medium uppercase text-[var(--app-hint)]">
-                                            {t('session.outline.kind.user')}
-                                        </span>
-                                        <span className="line-clamp-2 text-sm leading-snug text-[var(--app-fg)]">
-                                            {item.label}
-                                        </span>
+                                    <span className="flex min-w-0 items-center gap-2 text-[11px] font-medium tabular-nums text-[var(--app-hint)]">
+                                        <span className="h-2 w-2 shrink-0 rounded-full bg-[var(--app-button)]" aria-hidden="true" />
+                                        <time
+                                            dateTime={createdAt.toISOString()}
+                                            title={formatMessageTimestampTitle(createdAt)}
+                                            className="truncate"
+                                        >
+                                            {formatOutlineTimestamp(createdAt, locale)}
+                                        </time>
+                                    </span>
+                                    <span className="mt-0.5 line-clamp-2 pl-4 text-sm leading-snug text-[var(--app-fg)]">
+                                        {item.label}
                                     </span>
                                 </button>
                             )
@@ -259,7 +354,6 @@ export function HappyThread(props: {
     messagesVersion: number
     forceScrollToken: number
     outlineOpen: boolean
-    outlineTitle: string
     outlineItems: readonly ConversationOutlineItem[]
     onOutlineOpenChange: (open: boolean) => void
     onOutlineItemClick?: (item: ConversationOutlineItem) => void
@@ -268,6 +362,8 @@ export function HappyThread(props: {
     const { terminalToolDisplayMode } = useTerminalToolDisplayMode()
     const viewportRef = useRef<HTMLDivElement | null>(null)
     const contentRef = useRef<HTMLDivElement | null>(null)
+    const [shareTurn, setShareTurn] = useState<ShareTurnState>(null)
+    const shareTurnIdRef = useRef(0)
     const topSentinelRef = useRef<HTMLDivElement | null>(null)
     const loadLockRef = useRef(false)
     const pendingScrollRef = useRef<PendingScrollRestore | null>(null)
@@ -440,6 +536,10 @@ export function HappyThread(props: {
         lastScrollTopRef.current = viewportRef.current?.scrollTop ?? 0
         atBottomRef.current = true
         onAtBottomChangeRef.current(true)
+        // Re-entry forces the thread to the bottom, so release anything the
+        // non-at-bottom cold load parked in pending — otherwise new messages
+        // stay invisible until the user manually scrolls to bottom.
+        onFlushPendingRef.current()
         forceScrollTokenRef.current = props.forceScrollToken
         pendingScrollRef.current = null
         loadLockRef.current = false
@@ -464,6 +564,7 @@ export function HappyThread(props: {
         autoScrollEnabledRef.current = true
         atBottomRef.current = true
         onAtBottomChangeRef.current(true)
+        onFlushPendingRef.current()
         scrollToBottomInstant()
 
         initialScrollDeadlineRef.current = Date.now() + INITIAL_SCROLL_SETTLE_MS
@@ -680,6 +781,72 @@ export function HappyThread(props: {
     }, [props.isLoadingMoreMessages, settlePendingLoad])
 
     const showSkeleton = props.isLoadingMessages && props.rawMessagesCount === 0 && props.pendingCount === 0
+    const handleShareTurn = useCallback((
+        messageTarget: HTMLElement | string | null,
+        clientY?: number,
+        fallbackSnapshot?: ShareTurnSnapshot
+    ) => {
+        const content = contentRef.current
+        if (!content) return
+
+        let target: HTMLElement | null = typeof messageTarget === 'string'
+            ? document.getElementById(messageTarget)
+            : messageTarget
+        if (!(target instanceof HTMLElement) || !content.contains(target)) {
+            target = findNearestMessageElement(content, clientY)
+        }
+        if (!(target instanceof HTMLElement) || !content.contains(target)) {
+            setShareTurn({
+                id: ++shareTurnIdRef.current,
+                snapshots: fallbackSnapshot ? [fallbackSnapshot] : [],
+                title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
+                subtitle: [props.metadata?.flavor, props.metadata?.host].filter(Boolean).join(' · ') || props.sessionId
+            })
+            return
+        }
+
+        let start: Element | null = target
+        while (start?.previousElementSibling && start.getAttribute('data-hapi-message-role') !== 'user') {
+            start = start.previousElementSibling
+        }
+        if (!start || start.getAttribute('data-hapi-message-role') !== 'user') {
+            start = target
+        }
+
+        const snapshots: ShareTurnSnapshot[] = []
+        let current: Element | null = start
+        while (current instanceof HTMLElement) {
+            if (current !== start && current.getAttribute('data-hapi-message-role') === 'user') {
+                break
+            }
+            const role = current.getAttribute('data-hapi-message-role')
+            if (role === 'user' || role === 'assistant') {
+                snapshots.push({
+                    html: current.outerHTML,
+                    text: (current.innerText || current.textContent || '').trim()
+                })
+            }
+            current = current.nextElementSibling
+        }
+
+        if (snapshots.length === 0 && target instanceof HTMLElement) {
+            snapshots.push({
+                html: target.outerHTML,
+                text: (target.innerText || target.textContent || '').trim()
+            })
+        }
+        if (snapshots.length === 0 && fallbackSnapshot) {
+            snapshots.push(fallbackSnapshot)
+        }
+        const completeSnapshots = prependMissingUserSnapshot(snapshots, fallbackSnapshot)
+
+        setShareTurn({
+            id: ++shareTurnIdRef.current,
+            snapshots: completeSnapshots,
+            title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
+            subtitle: [props.metadata?.flavor, props.metadata?.host].filter(Boolean).join(' · ') || props.sessionId
+        })
+    }, [props.metadata, props.sessionId])
 
     return (
         <HappyChatProvider value={{
@@ -690,6 +857,7 @@ export function HappyThread(props: {
             disabled: props.disabled,
             onRefresh: props.onRefresh,
             onRetryMessage: props.onRetryMessage,
+            onShareTurn: handleShareTurn,
             hasMoreMessages: props.hasMoreMessages,
             isLoadingMoreMessages: props.isLoadingMoreMessages,
             loadOlderMessagesPreservingScroll: loadOlderFromUserAction
@@ -767,7 +935,6 @@ export function HappyThread(props: {
                             onClick={() => props.onOutlineOpenChange(false)}
                         />
                         <ConversationOutlinePanel
-                            title={props.outlineTitle}
                             items={props.outlineItems}
                             hasMoreMessages={props.hasMoreMessages}
                             isLoadingMoreMessages={props.isLoadingMoreMessages}
@@ -779,6 +946,14 @@ export function HappyThread(props: {
                         />
                     </>
                 ) : null}
+                <ShareTurnDialog
+                    key={shareTurn?.id ?? 'closed'}
+                    isOpen={shareTurn !== null}
+                    title={shareTurn?.title ?? ''}
+                    subtitle={shareTurn?.subtitle ?? ''}
+                    sourceSnapshots={shareTurn?.snapshots ?? []}
+                    onClose={() => setShareTurn(null)}
+                />
             </ThreadPrimitive.Root>
         </HappyChatProvider>
     )

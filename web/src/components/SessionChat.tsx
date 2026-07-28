@@ -26,7 +26,7 @@ import {
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
-import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
+import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
@@ -336,10 +336,14 @@ export function ScratchlistDrawerHost(props: {
         // Promote-to-queue bypasses the scratchlist-mode wrapper by
         // calling props.onSend directly (the chat send), so the queue
         // entry lands in the conversation regardless of scratchlist
-        // mode. Mode itself stays on - the operator may still be
-        // capturing related notes.
-        return await props.onSend(text)
-    }, [props.onSend])
+        // mode. After a successful send, exit scratchlist mode so the
+        // operator can continue normal chat (issue #959).
+        const accepted = await props.onSend(text)
+        if (accepted) {
+            props.onExitScratchlistMode()
+        }
+        return accepted
+    }, [props.onSend, props.onExitScratchlistMode])
     return (
         <ScratchlistDrawer
             entries={props.entries}
@@ -360,19 +364,6 @@ export function buildGoalStateMessages(
     return eligiblePendingMessages.length > 0
         ? mergeMessages(eligibleMessages, eligiblePendingMessages)
         : eligibleMessages
-}
-
-function getOutlineTitle(session: Session): string {
-    if (session.metadata?.name) {
-        return session.metadata.name
-    }
-    if (session.metadata?.summary?.text) {
-        return session.metadata.summary.text
-    }
-    if (session.metadata?.path) {
-        return session.metadata.path
-    }
-    return session.id.slice(0, 8)
 }
 
 function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
@@ -553,9 +544,16 @@ function SessionChatInner(props: SessionChatProps) {
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
     const codexModelsState = useCodexModels({
         api: props.api,
-        sessionId: props.session.id,
+        machineId: props.session.metadata?.machineId ?? null,
         enabled: agentFlavor === 'codex' && props.session.active && !controlledByUser
     })
+    const effectiveCodexServiceTier = agentFlavor === 'codex'
+        ? getEffectiveCodexServiceTier(
+            props.session.serviceTier,
+            props.session.model,
+            codexModelsState.models
+        )
+        : undefined
     const codexModelOptions = useMemo(() => {
         if (agentFlavor !== 'codex') {
             return undefined
@@ -970,11 +968,6 @@ function SessionChatInner(props: SessionChatProps) {
         [reconciled.blocks]
     )
 
-    const outlineTitle = useMemo(
-        () => getOutlineTitle(props.session),
-        [props.session]
-    )
-
     // Permission mode change handler
     const handlePermissionModeChange = useCallback(async (mode: PermissionMode) => {
         try {
@@ -1217,6 +1210,7 @@ function SessionChatInner(props: SessionChatProps) {
         <div className="flex h-full min-h-0 flex-col">
             <SessionHeader
                 session={props.session}
+                serviceTier={effectiveCodexServiceTier}
                 onBack={props.onBack}
                 onToggleFiles={props.session.metadata?.path ? handleToggleFiles : undefined}
                 filesActive={false}
@@ -1280,47 +1274,47 @@ function SessionChatInner(props: SessionChatProps) {
                         messagesVersion={props.messagesVersion}
                         forceScrollToken={forceScrollToken}
                         outlineOpen={outlineOpen}
-                        outlineTitle={outlineTitle}
                         outlineItems={outlineItems}
                         onOutlineOpenChange={setOutlineOpen}
                     />
 
-                    {codexCollaborationModeSupported && codexModelsState.error ? (
-                        <div className="px-3 pb-2">
-                            <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
-                                {t('session.codexModelsLoadFailed')}: {codexModelsState.error}
+                    <div className={outlineOpen ? 'max-sm:hidden' : undefined}>
+                        {codexCollaborationModeSupported && codexModelsState.error ? (
+                            <div className="px-3 pb-2">
+                                <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
+                                    {t('session.codexModelsLoadFailed')}: {codexModelsState.error}
+                                </div>
                             </div>
-                        </div>
-                    ) : null}
-
-                    <div className="px-3">
-                        {/*
-                         * Scratchlist drawer - composer-controlled. Only
-                         * mounted when the operator clicks the notepad icon
-                         * in the composer toolbar. State lives in the
-                         * useScratchlist hook above (so the toolbar counter
-                         * and the drawer share one source of truth).
-                         */}
-                        {scratchlistMode ? (
-                            <ScratchlistDrawerHost
-                                entries={scratchlist.entries}
-                                onMove={scratchlist.move}
-                                onDelete={scratchlist.remove}
-                                onSend={props.onSend}
-                                onExitScratchlistMode={() => setScratchlistMode(false)}
-                            />
                         ) : null}
-                        <QueuedMessagesBar
-                            sessionId={props.session.id}
-                            api={props.api}
-                            onEdit={({ pendingSchedule: restored }) => {
-                                // Restore the schedule so the clock button re-activates
-                                setPendingSchedule(restored)
-                            }}
-                        />
-                    </div>
 
-                    <HappyComposer
+                        <div className="px-3">
+                            {/*
+                             * Scratchlist drawer - composer-controlled. Only
+                             * mounted when the operator clicks the notepad icon
+                             * in the composer toolbar. State lives in the
+                             * useScratchlist hook above (so the toolbar counter
+                             * and the drawer share one source of truth).
+                             */}
+                            {scratchlistMode ? (
+                                <ScratchlistDrawerHost
+                                    entries={scratchlist.entries}
+                                    onMove={scratchlist.move}
+                                    onDelete={scratchlist.remove}
+                                    onSend={props.onSend}
+                                    onExitScratchlistMode={() => setScratchlistMode(false)}
+                                />
+                            ) : null}
+                            <QueuedMessagesBar
+                                sessionId={props.session.id}
+                                api={props.api}
+                                onEdit={({ pendingSchedule: restored }) => {
+                                    // Restore the schedule so the clock button re-activates
+                                    setPendingSchedule(restored)
+                                }}
+                            />
+                        </div>
+
+                        <HappyComposer
                         key={`composer-${props.session.id}`}
                         sessionId={props.session.id}
                         disabled={props.isSending}
@@ -1449,7 +1443,7 @@ function SessionChatInner(props: SessionChatProps) {
                                     : undefined)
                                 : handleEffortChange
                         }
-                        serviceTier={agentFlavor === 'codex' ? props.session.serviceTier : undefined}
+                        serviceTier={effectiveCodexServiceTier}
                         onServiceTierChange={
                             agentFlavor === 'codex'
                                 && props.session.active
@@ -1472,7 +1466,8 @@ function SessionChatInner(props: SessionChatProps) {
                         onScratchlistToggle={handleScratchlistToggle}
                         sendError={props.sendError ?? null}
                         onClearSendError={props.onClearSendError}
-                    />
+                        />
+                    </div>
                 </DragDropZone>
             </AssistantRuntimeProvider>
 

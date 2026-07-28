@@ -32,15 +32,43 @@ export function formatMessageTimestamp(date: Date, now: Date = new Date()): stri
         && date.getDate() === now.getDate()
 
     if (sameDay) {
-        return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     }
 
     const sameYear = date.getFullYear() === now.getFullYear()
     if (sameYear) {
-        return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     }
 
-    return date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    return date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+}
+
+export function formatOutlineTimestamp(
+    date: Date,
+    locale: 'en' | 'zh-CN',
+    now: Date = new Date()
+): string {
+    const sameDay = date.getFullYear() === now.getFullYear()
+        && date.getMonth() === now.getMonth()
+        && date.getDate() === now.getDate()
+    const time = date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+
+    if (sameDay) {
+        return time
+    }
+
+    const year = String(date.getFullYear())
+    const month = String(date.getMonth() + 1).padStart(2, '0')
+    const day = String(date.getDate()).padStart(2, '0')
+    const sameYear = date.getFullYear() === now.getFullYear()
+
+    if (locale === 'zh-CN') {
+        const dateLabel = sameYear ? `${month}月${day}日` : `${year}年${month}月${day}日`
+        return `${dateLabel} ${time}`
+    }
+
+    const dateLabel = sameYear ? `${month}/${day}` : `${year}/${month}/${day}`
+    return `${dateLabel} ${time}`
 }
 
 export function formatMessageTimestampTitle(date: Date): string {

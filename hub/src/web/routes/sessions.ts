@@ -339,7 +339,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         const lifecycleState = sessionResult.session.metadata?.lifecycleState
-        if (lifecycleState === 'archived') {
+        if (!sessionResult.session.active && lifecycleState === 'archived') {
             return c.json({ ok: true, alreadyArchived: true })
         }
 
@@ -763,36 +763,6 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list skills'
             })
-        }
-    })
-
-    app.get('/sessions/:id/codex-models', async (c) => {
-        const engine = requireSyncEngine(c, getSyncEngine)
-        if (engine instanceof Response) {
-            return engine
-        }
-
-        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
-        if (sessionResult instanceof Response) {
-            return sessionResult
-        }
-
-        const flavor = sessionResult.session.metadata?.flavor ?? 'claude'
-        if (flavor !== 'codex') {
-            return c.json({
-                success: false,
-                error: 'Codex models are only available for Codex sessions'
-            }, 400)
-        }
-
-        try {
-            const result = await engine.listCodexModelsForSession(sessionResult.sessionId)
-            return c.json(result)
-        } catch (error) {
-            return c.json({
-                success: false,
-                error: error instanceof Error ? error.message : 'Failed to list Codex models'
-            }, 500)
         }
     })
 

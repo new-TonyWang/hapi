@@ -90,6 +90,7 @@ function MoreVerticalIcon(props: { className?: string }) {
 
 export function SessionHeader(props: {
     session: Session
+    serviceTier?: string | null
     onBack: () => void
     onToggleFiles?: () => void
     filesActive?: boolean
@@ -113,7 +114,7 @@ export function SessionHeader(props: {
         ? formatCodexReasoningLabel(session.modelReasoningEffort)
         : null
     // Match expected Fast badge semantics (#1004): only explicit service tier, no effort/model heuristics.
-    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(session.serviceTier)
+    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(props.serviceTier ?? session.serviceTier)
     const codexSessionId = session.metadata?.flavor === 'codex'
         ? session.metadata.codexSessionId?.trim() || null
         : null
@@ -238,7 +239,7 @@ export function SessionHeader(props: {
                         </div>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)]">
                             <span className="inline-flex items-center gap-1">
-                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0" />
+                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
                                 {session.metadata?.flavor?.trim() || 'unknown'}
                             </span>
                             {modelLabel ? (
@@ -307,6 +308,8 @@ export function SessionHeader(props: {
             <SessionActionMenu
                 isOpen={menuOpen}
                 onClose={() => setMenuOpen(false)}
+                sessionId={session.id}
+                sessionTitle={title}
                 sessionActive={session.active}
                 onRename={() => setRenameOpen(true)}
                 onExport={() => setExportOpen(true)}

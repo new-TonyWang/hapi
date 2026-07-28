@@ -24,15 +24,19 @@ import {
     applyCursorAcpMode,
     applyCursorAcpModel,
     isCursorAutoReviewMode,
+    resolveCursorModeAfterPlanApproval,
     wireIdForCursorSessionState
 } from './utils/cursorModeConfig';
+import { CURSOR_PLAN_CONTINUE } from './utils/cursorPlanContinue';
 import { cursorPassThroughStatusMessage, parseCursorSpecialCommand } from './cursorSpecialCommands';
 import { buildCursorModelsSeedPayload, seedCursorModelsCache } from '@/modules/common/cursorModels';
 import { readSharedCursorModelsCache } from '@/modules/common/cursorModelsSharedCache';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
+import { registerAcpSessionTitleSync } from '@/agent/acpSessionTitle';
 class CursorAcpRemoteLauncher extends RemoteLauncherBase {
     private readonly session: CursorSession;
     private backend: ReturnType<typeof createCursorAcpBackend> | null = null;
+    private acpSessionId: string | null = null;
     private permissionAdapter: PermissionAdapter | null = null;
     private extensionAdapter: CursorExtensionAdapter | null = null;
     private happyServer: { stop: () => void } | null = null;
@@ -67,6 +71,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const messageBuffer = this.messageBuffer;
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
+            enableChangeTitle: false,
             skillLookup: { workingDirectory: session.path, flavor: 'cursor' }
         });
         this.happyServer = happyServer;
@@ -81,6 +86,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
             addDirs: session.cursorAddDirs
         });
         this.backend = backend;
+        registerAcpSessionTitleSync(backend, session.client);
         this.recordCursorNativeWorktreeMetadata();
 
         backend.setUsageUpdateListener((message) => this.handleAgentMessage(message));
@@ -112,7 +118,8 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         const extensionAdapter = new CursorExtensionAdapter(
             session.client,
             backend,
-            (message) => this.handleAgentMessage(message)
+            (message) => this.handleAgentMessage(message),
+            () => this.handleCreatePlanAccepted()
         );
         this.extensionAdapter = extensionAdapter;
 
@@ -152,6 +159,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 mcpServers: mcpServerList
             });
         }
+        this.acpSessionId = acpSessionId;
 
         if (acpSessionId !== resumeSessionId) {
             session.onSessionFoundWithProtocol(acpSessionId, 'acp');
@@ -252,6 +260,7 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
                 await backend.prompt(acpSessionId, promptContent, (message) => {
                     this.handleAgentMessage(message);
                 });
+                void backend.refreshSessionInfo(acpSessionId, session.path);
             } catch (error) {
                 logger.warn('[cursor-acp] prompt failed', error);
                 const errMsg = error instanceof Error ? error.message : String(error);
@@ -298,6 +307,35 @@ class CursorAcpRemoteLauncher extends RemoteLauncherBase {
         }
 
         setCursorAcpModelsSnapshot(null);
+    }
+
+    private handleCreatePlanAccepted(): void {
+        const backend = this.backend;
+        const acpSessionId = this.acpSessionId;
+        if (!backend || !acpSessionId) {
+            logger.warn('[cursor-acp] CreatePlan accepted but ACP session is not ready; skip continue handoff');
+            return;
+        }
+
+        const session = this.session;
+        const executeMode = resolveCursorModeAfterPlanApproval(
+            session.getPermissionMode() as PermissionMode
+        ) as PermissionMode;
+
+        // Leave plan/ask for an executable mode, then queue a continue prompt so
+        // Yes means "keep going on the user task" (Claude ExitPlanMode parallel).
+        session.setPermissionMode(executeMode);
+        void applyCursorAcpMode(backend, acpSessionId, executeMode).then(() => {
+            this.applyDisplayMode(executeMode);
+        });
+
+        session.queue.unshiftIsolated(CURSOR_PLAN_CONTINUE, {
+            permissionMode: executeMode,
+            model: session.model
+        });
+        logger.debug('[cursor-acp] CreatePlan accepted — queued continue prompt', {
+            executeMode
+        });
     }
 
     private handleAgentMessage(message: AgentMessage): void {

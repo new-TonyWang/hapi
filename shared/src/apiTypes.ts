@@ -402,6 +402,18 @@ export type ListDirectoryResponse = {
 
 export type RpcListDirectoryResponse = ListDirectoryResponse
 
+export type FileMetadataEntry = {
+    path: string
+    size?: number
+    modified?: number
+}
+
+export type StatFilesResponse = {
+    success: boolean
+    entries?: FileMetadataEntry[]
+    error?: string
+}
+
 export type MachineDirectoryEntry = DirectoryEntry & {
     isGitRepo?: boolean
 }
@@ -423,6 +435,7 @@ export type CodexModelSummary = {
     displayName: string
     isDefault: boolean
     defaultReasoningEffort?: string | null
+    defaultServiceTier?: string | null
     supportedReasoningEfforts?: string[]
     /** Service tier ids advertised for this model in the current auth/plan context (e.g. 'fast'). */
     serviceTiers?: string[]

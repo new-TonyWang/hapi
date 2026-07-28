@@ -34,6 +34,7 @@ Run Claude Code, Codex, Cursor Agent, Grok Build, or OpenCode sessions from your
 - `hapi opencode` - Start OpenCode mode via ACP. See `src/opencode/runOpencode.ts`.
   Note: OpenCode supports local and remote modes; local mode streams via OpenCode plugins.
 - `hapi resume [sessionId]` - List resumable sessions for this machine or resume one locally.
+- `hapi ping-peer <session-id-prefix> <message>` - Resume (if needed) and message another session. Prefer this or MCP `ping_peer` over reinventing JWT+curl. Also `--message-file` / `--list`.
 
 ### Resume a remote session locally
 
@@ -113,6 +114,20 @@ See `src/configuration.ts` for all options.
 - `HAPI_WORKTREE_NAME` - Worktree name.
 - `HAPI_WORKTREE_PATH` - Full worktree path.
 - `HAPI_WORKTREE_CREATED_AT` - Creation timestamp (ms).
+
+### Set for the wrapped agent
+
+- `HAPI_SESSION_ID` - The hub session id for the current run, exported into the wrapped agent/CLI child environment at spawn for every flavor (claude / codex / cursor / gemini / opencode / kimi / grok / pi), both runner-spawned and locally started sessions. Agents can read it to self-target "this chat" over the hub REST API or shell helpers without listing `/api/sessions`. Prefer the MCP `display_image` tool for inline media when it is available; use `HAPI_SESSION_ID` for hub REST / shell tooling where MCP is not. To message **another** session, prefer MCP `ping_peer` or `hapi ping-peer` — do not reinvent JWT+curl.
+
+  Lazy Codex (terminal) sessions export the id only after the hub row is materialized, which happens when the MCP bridge starts — before the agent process is spawned — so path-only self-targeting does not race a missing hub row.
+
+  Example (shell fallback when MCP is unavailable) — path-only, self-targets the current session:
+
+  ```bash
+  bun scripts/tooling/hapi-display-image.mjs /absolute/path/to/image.png "optional title"
+  ```
+
+  Explicit other session (prefix or full uuid) still works; that path may list sessions.
 
 ## Storage
 
