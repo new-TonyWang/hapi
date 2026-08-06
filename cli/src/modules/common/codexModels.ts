@@ -33,6 +33,27 @@ export function listCodexProfiles(codexHome = process.env.CODEX_HOME || join(hom
     return [...profiles].sort((a, b) => a.localeCompare(b));
 }
 
+export function listCodexProviders(codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')): string[] {
+    const providers = new Set<string>()
+    if (!existsSync(codexHome)) return []
+    const add = (value: string | undefined) => { const v = value?.trim(); if (v) providers.add(v) }
+    const mainConfigPath = join(codexHome, 'config.toml')
+    if (existsSync(mainConfigPath)) {
+        for (const rawLine of readFileSync(mainConfigPath, 'utf8').split(/\r?\n/)) {
+            const header = rawLine.trim().match(/^\[model_providers\.([A-Za-z0-9_.-]+)\]$/)
+            if (header?.[1]) add(header[1])
+        }
+    }
+    for (const entry of readdirSync(codexHome, { withFileTypes: true })) {
+        if (!entry.isFile() || !entry.name.endsWith('.config.toml')) continue
+        for (const rawLine of readFileSync(join(codexHome, entry.name), 'utf8').split(/\r?\n/)) {
+            const match = rawLine.trim().match(/^model_provider\s*=\s*["']([^"']+)["']/)
+            if (match?.[1]) add(match[1])
+        }
+    }
+    return [...providers].sort((a, b) => a.localeCompare(b))
+}
+
 function asNonEmptyString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }

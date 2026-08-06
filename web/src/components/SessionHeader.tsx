@@ -26,6 +26,8 @@ import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
 import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { selectMobileSessionHeaderSecondary } from '@/lib/sessionHeaderMobileMetadata'
 import { useMinuteTick } from '@/hooks/useMinuteTick'
+import { useCodexModels } from '@/hooks/queries/useCodexModels'
+import { ChangeCodexProviderDialog } from '@/components/ChangeCodexProviderDialog'
 
 /** Same preference order as session-list chips: display label → host → short id. */
 export function resolveSessionHeaderMachineLabel(
@@ -221,12 +223,18 @@ export function SessionHeader(props: {
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [isSyncingCodex, setIsSyncingCodex] = useState(false)
     const [isSyncingPi, setIsSyncingPi] = useState(false)
+    const [changeProviderOpen, setChangeProviderOpen] = useState(false)
 
-    const { archiveSession, reopenSession, renameSession, deleteSession, isPending } = useSessionActions(
+    const { archiveSession, reopenSession, renameSession, deleteSession, setCodexProvider, isPending } = useSessionActions(
         api,
         session.id,
         session.metadata?.flavor ?? null
     )
+    const { providers: codexProviders } = useCodexModels({
+        api,
+        machineId: typeof session.metadata?.machineId === 'string' ? session.metadata.machineId : null,
+        enabled: agentFlavor === 'codex'
+    })
     const [reopenError, setReopenError] = useState<string | null>(null)
     // tiann/hapi#893: surface the scratchlist entry count in the
     // delete-confirm copy so the operator knows what cascades when they
@@ -525,6 +533,7 @@ export function SessionHeader(props: {
                 onExport={() => setExportOpen(true)}
                 onSyncCodex={api && codexSessionId ? handleSyncCodex : undefined}
                 onSyncPi={api && piSessionId && !session.active ? handleSyncPi : undefined}
+                onChangeCodexProvider={api && agentFlavor === 'codex' ? () => setChangeProviderOpen(true) : undefined}
                 onArchive={() => setArchiveOpen(true)}
                 onReopen={props.canReopen === false ? undefined : handleReopen}
                 reopenDisabledReason={props.reopenDisabledReason}
@@ -560,6 +569,15 @@ export function SessionHeader(props: {
                 onClose={() => setExportOpen(false)}
                 sessionId={session.id}
                 api={api}
+            />
+
+            <ChangeCodexProviderDialog
+                isOpen={changeProviderOpen}
+                onClose={() => setChangeProviderOpen(false)}
+                currentProvider={codexProvider}
+                providers={codexProviders}
+                onChange={setCodexProvider}
+                isPending={isPending}
             />
 
             <ConfirmDialog

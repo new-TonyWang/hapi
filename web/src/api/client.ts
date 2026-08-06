@@ -628,6 +628,13 @@ export class ApiClient {
         })
     }
 
+    async setCodexProvider(sessionId: string, provider: string | null): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/codex-provider`, {
+            method: 'POST',
+            body: JSON.stringify({ provider })
+        })
+    }
+
     async approvePermission(
         sessionId: string,
         requestId: string,

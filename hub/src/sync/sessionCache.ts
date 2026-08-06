@@ -849,6 +849,29 @@ export class SessionCache {
         throw new Error('Session was modified concurrently. Please try again.')
     }
 
+    /** Persist the Codex provider; empty string is the explicit default-provider sentinel. */
+    setCodexProvider(sessionId: string, provider: string): void {
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session?.metadata) throw new Error('Session metadata unavailable')
+            if (session.metadata.codexProvider === provider) return
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                { ...session.metadata, codexProvider: provider },
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+            if (result.result === 'error') throw new Error('Failed to update Codex provider')
+            this.refreshSession(sessionId)
+        }
+        throw new Error('Session was modified concurrently while changing provider')
+    }
+
     /**
      * Clear archive-related metadata on an archived session so it can be resumed.
      * - Removes `lifecycleState`, `archivedBy`, `archiveReason`, and stamps

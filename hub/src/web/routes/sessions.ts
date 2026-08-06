@@ -11,6 +11,7 @@ import {
     ScratchlistEntryCreateRequestSchema,
     ScratchlistEntryUpdateRequestSchema,
     SessionCollaborationModeRequestSchema,
+    SessionCodexProviderRequestSchema,
     SessionCopilotAgentModeRequestSchema,
     SessionEffortRequestSchema,
     SessionModelReasoningEffortRequestSchema,
@@ -756,6 +757,23 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ ok: true })
         } catch (error) {
             const message = error instanceof Error ? error.message : 'Failed to apply service tier'
+            return c.json({ error: message }, 409)
+        }
+    })
+
+    app.post('/sessions/:id/codex-provider', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: false })
+        if (sessionResult instanceof Response) return sessionResult
+        const body = await c.req.json().catch(() => null)
+        const parsed = SessionCodexProviderRequestSchema.safeParse(body)
+        if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
+        try {
+            await engine.changeCodexProvider(sessionResult.sessionId, c.get('namespace'), parsed.data.provider)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to change Codex provider'
             return c.json({ error: message }, 409)
         }
     })

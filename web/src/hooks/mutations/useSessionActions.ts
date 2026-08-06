@@ -26,6 +26,7 @@ export function useSessionActions(
     setModelReasoningEffort: (modelReasoningEffort: string | null) => Promise<void>
     setEffort: (effort: string | null) => Promise<void>
     setServiceTier: (serviceTier: string | null) => Promise<void>
+    setCodexProvider: (provider: string | null) => Promise<void>
     renameSession: (name: string) => Promise<void>
     deleteSession: () => Promise<void>
     isPending: boolean
@@ -217,6 +218,15 @@ export function useSessionActions(
         onSuccess: () => void invalidateSession(),
     })
 
+    const codexProviderMutation = useMutation({
+        mutationFn: async (provider: string | null) => {
+            if (!api || !sessionId) throw new Error('Session unavailable')
+            if (agentFlavor !== 'codex') throw new Error('Provider selection is only supported for Codex sessions')
+            await api.setCodexProvider(sessionId, provider)
+        },
+        onSuccess: () => void invalidateSession(),
+    })
+
     const renameMutation = useMutation({
         mutationFn: async (name: string) => {
             if (!api || !sessionId) {
@@ -254,6 +264,7 @@ export function useSessionActions(
         setModelReasoningEffort: modelReasoningEffortMutation.mutateAsync,
         setEffort: effortMutation.mutateAsync,
         setServiceTier: serviceTierMutation.mutateAsync,
+        setCodexProvider: codexProviderMutation.mutateAsync,
         renameSession: renameMutation.mutateAsync,
         deleteSession: deleteMutation.mutateAsync,
         isPending: abortMutation.isPending
@@ -267,6 +278,7 @@ export function useSessionActions(
             || modelReasoningEffortMutation.isPending
             || effortMutation.isPending
             || serviceTierMutation.isPending
+            || codexProviderMutation.isPending
             || renameMutation.isPending
             || deleteMutation.isPending,
     }

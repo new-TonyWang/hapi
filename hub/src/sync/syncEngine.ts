@@ -1519,6 +1519,27 @@ async uploadScratchlistAttachment(
         this.handleSessionEnd({ sid: sessionId, time: Date.now() })
     }
 
+    /** Change Codex provider, restarting a remote session when necessary. */
+    async changeCodexProvider(sessionId: string, namespace: string, provider: string | null): Promise<void> {
+        const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) throw new Error(access.reason === 'access-denied' ? 'Session access denied' : 'Session not found')
+        const session = access.session
+        if (session.metadata?.flavor !== 'codex') throw new Error('Provider selection is only supported for Codex sessions')
+        if (session.agentState?.controlledByUser === true) throw new Error('Provider selection is only supported for remote sessions')
+        const normalized = provider?.trim() ?? ''
+        const wasActive = session.active
+        if (wasActive) await this.archiveSession(sessionId)
+        try {
+            this.sessionCache.setCodexProvider(sessionId, normalized)
+            if (wasActive) {
+                const result = await this.reopenSession(sessionId, namespace)
+                if (result.type !== 'success') throw new Error(result.message)
+            }
+        } catch (error) {
+            throw error instanceof Error ? error : new Error(String(error))
+        }
+    }
+
     /**
      * Apply the post-migration metadata flip in hapi.db:
      *   - metadata.cursorSessionProtocol = 'acp'

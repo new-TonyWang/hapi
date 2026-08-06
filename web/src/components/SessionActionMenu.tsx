@@ -24,6 +24,7 @@ type SessionActionMenuProps = {
     onExport?: () => void
     onSyncCodex?: () => void
     onSyncPi?: () => void
+    onChangeCodexProvider?: () => void
     onArchive: () => void
     onReopen?: () => void
     reopenDisabledReason?: string
@@ -136,6 +137,10 @@ function SyncIcon(props: { className?: string }) {
     )
 }
 
+function ProviderIcon(props: { className?: string }) {
+    return <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={props.className}><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/><path d="m8 12 3 3 5-6"/></svg>
+}
+
 function TrashIcon(props: { className?: string }) {
     return (
         <svg
@@ -178,6 +183,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onExport,
         onSyncCodex,
         onSyncPi,
+        onChangeCodexProvider,
         onArchive,
         onReopen,
         reopenDisabledReason,
@@ -230,6 +236,8 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onClose()
         onSyncPi?.()
     }
+
+    const handleChangeCodexProvider = () => { onClose(); onChangeCodexProvider?.() }
 
     const handleDelete = () => {
         onClose()
@@ -395,6 +403,13 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                     >
                         <SyncIcon className="text-[var(--app-hint)]" />
                         {t('session.action.syncPi')}
+                    </button>
+                ) : null}
+
+                {onChangeCodexProvider ? (
+                    <button type="button" role="menuitem" className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`} onClick={handleChangeCodexProvider}>
+                        <ProviderIcon className="text-[var(--app-hint)]" />
+                        Change provider
                     </button>
                 ) : null}
 
