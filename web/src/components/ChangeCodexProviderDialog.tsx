@@ -15,7 +15,12 @@ export function ChangeCodexProviderDialog(props: {
     const [customProvider, setCustomProvider] = useState('')
     const [error, setError] = useState<string | null>(null)
     const options = useMemo(() => {
-        const all = new Set(providers.filter(Boolean))
+        // Keep this list aligned with New Session's provider suggestions;
+        // machine-scanned providers are added on top of the built-in choices.
+        const all = new Set(['Zhipu_Bigmodel', 'bigmodel', 'openai'])
+        for (const provider of providers) {
+            if (provider.trim()) all.add(provider.trim())
+        }
         if (currentProvider?.trim()) all.add(currentProvider.trim())
         return [...all].sort((a, b) => a.localeCompare(b))
     }, [providers, currentProvider])
