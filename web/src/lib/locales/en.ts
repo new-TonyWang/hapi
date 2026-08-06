@@ -321,6 +321,7 @@ export default {
   'newSession.codexProfile.default': 'Default profile',
   'newSession.codexProfile.help': 'Profiles found on the selected machine. The default profile is not labeled on sessions.',
   'session.profile': 'Profile',
+  'session.provider': 'Provider',
   'newSession.agyModel.checkingAuth': 'Checking Antigravity authentication…',
   'newSession.agyModel.authRequired': 'Authentication required',
   'newSession.agyModel.authHint': 'Please run `agy` in a terminal to sign in with Google.',

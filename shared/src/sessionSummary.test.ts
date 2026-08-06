@@ -179,6 +179,19 @@ describe('toSessionSummary', () => {
         expect(summary.metadata?.codexProfile).toBe('tokenmax')
     })
 
+    it('includes the Codex provider in summary metadata for resumed sessions', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor: 'codex',
+                codexProvider: 'xubao'
+            }
+        }))
+
+        expect(summary.metadata?.codexProvider).toBe('xubao')
+    })
+
     it('includes structured pendingRequests for hover-tooltip copy', () => {
         const summary = toSessionSummary(makeSession({
             updatedAt: 5000,

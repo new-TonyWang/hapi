@@ -99,7 +99,7 @@ describe('SessionList machine filter', () => {
         expect(screen.getByTitle('/work/hapi')).toBeTruthy()
     })
 
-    it('shows a non-default Codex profile on the session row', () => {
+    it('shows non-default Codex profile/provider on the session row', () => {
         renderSessionList([
             makeSession({
                 id: 'session-profile',
@@ -109,7 +109,8 @@ describe('SessionList machine filter', () => {
                     machineId: 'machine-1',
                     flavor: 'codex',
                     agentSessionId: 'thread-profile',
-                    codexProfile: 'tokenmax'
+                    codexProfile: 'tokenmax',
+                    codexProvider: 'xubao'
                 }
             }),
             makeSession({
@@ -125,7 +126,9 @@ describe('SessionList machine filter', () => {
         ])
 
         expect(screen.getByTestId('session-list-profile-session-profile')).toHaveTextContent('tokenmax')
+        expect(screen.getByTestId('session-list-provider-session-profile')).toHaveTextContent('xubao')
         expect(screen.queryByTestId('session-list-profile-session-default')).toBeNull()
+        expect(screen.queryByTestId('session-list-provider-session-default')).toBeNull()
     })
 
     it('shows the filter bar and machine-suffixed group titles with multiple machines', () => {

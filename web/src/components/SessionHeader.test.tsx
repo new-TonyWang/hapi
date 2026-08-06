@@ -267,7 +267,7 @@ describe('SessionHeader', () => {
         }
     })
 
-    it('shows a selected Codex profile and omits the default profile', () => {
+    it('shows selected Codex profile/provider and omits their defaults', () => {
         const session: Session = {
             id: 'session-profile',
             namespace: 'default',
@@ -276,7 +276,13 @@ describe('SessionHeader', () => {
             updatedAt: 0,
             active: true,
             activeAt: 0,
-            metadata: { flavor: 'codex', path: '/repo', host: 'machine', codexProfile: 'tokenmax' },
+            metadata: {
+                flavor: 'codex',
+                path: '/repo',
+                host: 'machine',
+                codexProfile: 'tokenmax',
+                codexProvider: 'xubao'
+            },
             metadataVersion: 0,
             agentState: null,
             agentStateVersion: 0,
@@ -299,6 +305,7 @@ describe('SessionHeader', () => {
         )
 
         expect(screen.getByTestId('session-header-profile')).toHaveTextContent('Profile: tokenmax')
+        expect(screen.getByTestId('session-header-provider')).toHaveTextContent('Provider: xubao')
 
         rerender(
             <QueryClientProvider client={new QueryClient()}>
@@ -314,5 +321,6 @@ describe('SessionHeader', () => {
             </QueryClientProvider>
         )
         expect(screen.queryByTestId('session-header-profile')).toBeNull()
+        expect(screen.queryByTestId('session-header-provider')).toBeNull()
     })
 })

@@ -325,6 +325,7 @@ export default {
   'newSession.codexProfile.default': '默认 profile',
   'newSession.codexProfile.help': '自动扫描所选机器上的已有 profile；默认 profile 不会显示在 session 上。',
   'session.profile': 'Profile',
+  'session.provider': 'Provider',
   'newSession.opencodeModel.loading': '正在发现 OpenCode 模型…',
   'newSession.opencodeModel.loadFailed': '加载 OpenCode 模型失败',
   'newSession.opencodeModel.retry': '重试',

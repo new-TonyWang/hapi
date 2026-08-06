@@ -89,6 +89,7 @@ export type SessionMetadataSummary = {
     tools?: string[]
     flavor?: string | null
     codexProfile?: string
+    codexProvider?: string
     startingMode?: 'local' | 'remote' | 'pty' | null
     capabilities?: {
         terminal?: boolean

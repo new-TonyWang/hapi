@@ -42,6 +42,7 @@ export type SessionSummaryMetadata = {
     agentSessionId?: string
     lifecycleState?: string
     codexProfile?: string
+    codexProvider?: string
 }
 
 export type SessionSummary = {
@@ -194,7 +195,8 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
         worktree: metadata.worktree,
         agentSessionId: getSummaryAgentSessionId(metadata),
         lifecycleState: metadata.lifecycleState,
-        codexProfile: metadata.codexProfile
+        codexProfile: metadata.codexProfile,
+        codexProvider: metadata.codexProvider
     }
 }
 

@@ -178,6 +178,15 @@ export function SessionRowSummary(props: {
                             {s.metadata.codexProfile}
                         </span>
                     ) : null}
+                    {s.metadata?.flavor === 'codex' && s.metadata.codexProvider?.trim() ? (
+                        <span
+                            data-testid={`session-list-provider-${s.id}`}
+                            title={`${t('session.provider')}: ${s.metadata.codexProvider}`}
+                            className="shrink-0 rounded-full bg-[var(--app-secondary-bg)] px-1.5 py-0.5 text-[10px] text-[var(--app-hint)]"
+                        >
+                            {s.metadata.codexProvider}
+                        </span>
+                    ) : null}
                     {s.active && s.thinking ? (
                         <LoaderIcon className="h-3.5 w-3.5 shrink-0 animate-spin-slow text-[var(--app-badge-success-text)]" />
                     ) : urgentAttention && nestedTooltips && attentionId ? (
