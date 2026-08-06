@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { toSessionSummary, type Session } from '@hapi/protocol'
 import type { SessionSummary } from '@/types/api'
 import {
     deduplicateSessionsByAgentId,
@@ -6,6 +7,9 @@ import {
     filterActiveSessionsOnly,
     getSessionTimeRange,
     getNextSessionVisibleCount,
+    getPullRefreshIndicatorRotation,
+    getPreviousSessionVisibleCount,
+    getPullToRefreshState,
     getSessionDedupKey,
     getWorktreeSessionLabel,
     getVisibleSessionPreview,
@@ -24,6 +28,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         activeAt: 0,
         updatedAt: 0,
         metadata: null,
+        metadataVersion: 0,
+        agentStateVersion: 0,
+        todosUpdatedAt: 0,
         todoProgress: null,
         pendingRequestsCount: 0,
         pendingRequestKinds: [],
@@ -231,6 +238,39 @@ describe('prepareSidebarSessions', () => {
         expect(result.map(session => session.id)).toEqual(['real'])
     })
 
+    it('keeps an archived Pi session with a native session id and no title', () => {
+        const piSession: Session = {
+            id: 'archived-pi',
+            namespace: 'default',
+            seq: 1,
+            createdAt: 50,
+            active: false,
+            activeAt: 0,
+            updatedAt: 100,
+            metadata: {
+                path: '/work/hapi',
+                host: 'local',
+                flavor: 'pi',
+                piSessionId: 'pi-session-1',
+                lifecycleState: 'archived'
+            },
+            metadataVersion: 1,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            model: null,
+            modelReasoningEffort: null,
+            effort: null,
+            serviceTier: null
+        }
+
+        const summary = toSessionSummary(piSession)
+
+        expect(summary.metadata?.agentSessionId).toBe('pi-session-1')
+        expect(prepareSidebarSessions([summary]).map(session => session.id)).toEqual(['archived-pi'])
+    })
+
     it('keeps the selected inactive stub visible', () => {
         const sessions = [
             makeSession({ id: 'stub', metadata: { path: '/work/hapi' } }),
@@ -428,6 +468,22 @@ describe('getNextSessionVisibleCount', () => {
     })
 })
 
+describe('getPreviousSessionVisibleCount', () => {
+    it('collapses one batch of step size per call', () => {
+        expect(getPreviousSessionVisibleCount(20, 8)).toBe(12)
+        expect(getPreviousSessionVisibleCount(12, 8)).toBe(8)
+    })
+
+    it('never goes below the preview limit', () => {
+        expect(getPreviousSessionVisibleCount(10, 8)).toBe(8)
+        expect(getPreviousSessionVisibleCount(8, 8)).toBe(8)
+    })
+
+    it('uses a minimum batch size of one', () => {
+        expect(getPreviousSessionVisibleCount(5, 0)).toBe(4)
+    })
+})
+
 describe('expandSelectedSessionCollapseOverrides', () => {
     it('expands the collapsed project group, but preserves session preview folding', () => {
         const overrides = new Map<string, boolean>([
@@ -451,5 +507,21 @@ describe('expandSelectedSessionCollapseOverrides', () => {
         })
 
         expect(result.has('sessions::machine-1::/work/hapi')).toBe(false)
+    })
+})
+
+describe('getPullToRefreshState', () => {
+    it('requires a deliberate pull past the trigger distance', () => {
+        expect(getPullToRefreshState(15)).toBe('idle')
+        expect(getPullToRefreshState(16)).toBe('pulling')
+        expect(getPullToRefreshState(63)).toBe('pulling')
+        expect(getPullToRefreshState(64)).toBe('ready')
+    })
+})
+
+describe('getPullRefreshIndicatorRotation', () => {
+    it('turns the pull indicator upward once refresh is ready', () => {
+        expect(getPullRefreshIndicatorRotation('pulling')).toBe(0)
+        expect(getPullRefreshIndicatorRotation('ready')).toBe(180)
     })
 })

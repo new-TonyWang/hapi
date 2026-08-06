@@ -62,7 +62,9 @@ const SIMPLE_RESUME_TOKENS = [
     'opencodeSessionId',
     'grokSessionId',
     'cursorSessionId',
-    'kimiSessionId'
+    'kimiSessionId',
+    'copilotSessionId',
+    'piSessionId'
 ] as const
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -372,6 +374,50 @@ export function setSessionTodos(
             namespace
         })
 
+        return result.changes === 1
+    } catch {
+        return false
+    }
+}
+
+/**
+ * Force-replace todos after rewind/fork (ignores the normal
+ * `todos_updated_at < candidate` guard so an older remaining TodoWrite can
+ * land). The watermark itself MUST still advance: SSE clients gate structured
+ * todos patches on `todosUpdatedAt`, and dual EventSources can deliver a
+ * buffered pre-rewind patch after the post-rewind Session. Writing the
+ * remaining message's older `createdAt` here would let that stale patch win
+ * and resurrect deleted todos (PR #897 HAPI Bot 2026-08-03 Major).
+ *
+ * Ratchet: `null → now`, else `previous + 1`. Always strictly greater than any
+ * prior write on this row, so lagged pre-rewind versions are rejected.
+ */
+export function replaceSessionTodos(
+    db: Database,
+    id: string,
+    todos: unknown,
+    namespace: string
+): boolean {
+    try {
+        const json = todos === null || todos === undefined ? null : JSON.stringify(todos)
+        const now = Date.now()
+        const result = db.prepare(`
+            UPDATE sessions
+            SET todos = @todos,
+                todos_updated_at = CASE
+                    WHEN todos_updated_at IS NULL THEN @now
+                    ELSE todos_updated_at + 1
+                END,
+                updated_at = CASE WHEN updated_at > @now THEN updated_at ELSE @now END,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
+        `).run({
+            id,
+            todos: json,
+            now,
+            namespace
+        })
         return result.changes === 1
     } catch {
         return false

@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ThreadPrimitive } from '@assistant-ui/react'
+import { ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import type { ApiClient } from '@/api/client'
-import type { SessionMetadataSummary } from '@/types/api'
+import type { HappyRuntimeExtras } from '@/lib/assistant-runtime'
+import type { Session, SessionMetadataSummary } from '@/types/api'
 import type { ConversationOutlineItem } from '@/chat/outline'
 import { getConversationMessageAnchorId } from '@/chat/outline'
 import { formatMessageTimestampTitle, formatOutlineTimestamp } from '@/chat/presentation'
-import { HappyChatProvider } from '@/components/AssistantChat/context'
+import {
+    HappyChatProvider,
+    type OlderHistoryLoadResult
+} from '@/components/AssistantChat/context'
 import { HappyAssistantMessage } from '@/components/AssistantChat/messages/AssistantMessage'
 import { HappyUserMessage } from '@/components/AssistantChat/messages/UserMessage'
 import { HappySystemMessage } from '@/components/AssistantChat/messages/SystemMessage'
@@ -15,6 +19,17 @@ import { useTerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { useTranslation } from '@/lib/use-translation'
 import { CloseIcon } from '@/components/icons'
 import { ShareTurnDialog } from '@/components/AssistantChat/ShareTurnDialog'
+import { getSessionModelLabel } from '@/lib/sessionModelLabel'
+import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
+import type { OlderLoadOutcome } from '@/lib/message-window-store'
+import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
+import { useMachines } from '@/hooks/queries/useMachines'
+import { useMachineLabels } from '@/hooks/useMachineLabels'
+import { resolveSessionHeaderMachineLabel } from '@/components/SessionHeader'
+import { formatRelativeTime } from '@/lib/relativeTime'
+import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
+import { getShareTurnReasoningLabel, selectShareTurnMetadata } from '@/lib/shareTurnMetadata'
+import { useMinuteTick } from '@/hooks/useMinuteTick'
 
 type ScrollAnchor = {
     id: string
@@ -22,16 +37,29 @@ type ScrollAnchor = {
 }
 
 type PendingScrollRestore = {
+    runId: number
     anchor: ScrollAnchor | null
     scrollTop: number
     scrollHeight: number
+    targetHistoryVersion: number | null
+}
+
+type HistoryLoadSource = 'coverage' | 'user' | 'consumer'
+type PullToLoadState = 'idle' | 'pulling' | 'ready'
+
+type HistoryLoaderState = {
+    runId: number
+    phase: 'idle' | 'loading' | 'backoff' | 'awaiting-render'
+    source: HistoryLoadSource | null
+    failureCount: number
+    autoPaused: boolean
 }
 
 type ShareTurnState = {
     id: number
     snapshots: ShareTurnSnapshot[]
     title: string
-    subtitle: string
+    sourceContentWidth: number | null
 } | null
 
 type ShareTurnSnapshot = {
@@ -83,6 +111,31 @@ const AUTO_SCROLL_RESUME_THRESHOLD_PX = 120
 const MANUAL_SCROLL_EPSILON_PX = 1
 const INITIAL_SCROLL_SETTLE_MS = 1800
 const INITIAL_SCROLL_SETTLE_DELAYS_MS = [0, 16, 50, 120, 250, 500, 900, 1400, 1800] as const
+const HISTORY_PRELOAD_MARGIN_PX = 200
+// Bounded backoff for the same logical history load. A failed page leaves the
+// viewport geometry unchanged, so no new scroll/resize signal is guaranteed.
+const COVERAGE_FAILURE_RETRY_DELAY_MS = 1000
+const MAX_COVERAGE_LOAD_RETRIES = 3
+// Show feedback early, but require a deliberate pull before release loads.
+const TOP_PULL_FEEDBACK_PX = 16
+const TOP_PULL_TRIGGER_PX = 64
+// Silence between wheel events that marks the end of one upward gesture.
+// Trackpads emit a burst per swipe; one signal is enough to restart a paused
+// run after its bounded retry budget is exhausted.
+const WHEEL_GESTURE_GAP_MS = 250
+const KEYBOARD_SCROLL_INTENT_WINDOW_MS = 750
+const POINTER_CANCEL_INTENT_WINDOW_MS = 750
+const UPWARD_SCROLL_KEYS = new Set(['ArrowUp', 'PageUp', 'Home'])
+
+export function getPullToLoadState(distancePx: number): PullToLoadState {
+    if (distancePx >= TOP_PULL_TRIGGER_PX) {
+        return 'ready'
+    }
+    if (distancePx >= TOP_PULL_FEEDBACK_PX) {
+        return 'pulling'
+    }
+    return 'idle'
+}
 
 type ScrollIntent = {
     distanceFromBottom: number
@@ -113,8 +166,13 @@ export function getScrollIntent(params: {
     }
 }
 
-export function shouldCancelInitialScrollSettling(intent: ScrollIntent): boolean {
-    return intent.isScrollingUp && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX
+export function shouldCancelInitialScrollSettling(
+    intent: ScrollIntent,
+    hasExplicitUpwardIntent: boolean
+): boolean {
+    return hasExplicitUpwardIntent
+        && intent.isScrollingUp
+        && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX
 }
 
 export function captureScrollAnchor(viewport: HTMLElement): ScrollAnchor | null {
@@ -143,6 +201,13 @@ export function restoreScrollAnchor(viewport: HTMLElement, anchor: ScrollAnchor)
     return true
 }
 
+export function hasAppliedHistoryVersion(
+    pendingHistoryVersion: number,
+    appliedHistoryVersion: number
+): boolean {
+    return appliedHistoryVersion > pendingHistoryVersion
+}
+
 export async function locateOutlineTargetMessage(options: LocateOutlineTargetOptions): Promise<HTMLElement | null> {
     const anchorId = getConversationMessageAnchorId(options.targetMessageId)
     let target = options.findTarget(anchorId)
@@ -154,6 +219,26 @@ export async function locateOutlineTargetMessage(options: LocateOutlineTargetOpt
         target = options.findTarget(anchorId)
     }
     return target
+}
+
+export function shouldLoadOlderForViewport(params: {
+    scrollHeight: number
+    clientHeight: number
+    viewportTop: number
+    sentinelTop: number
+    sentinelBottom: number
+    preloadMarginPx?: number
+}): boolean {
+    const preloadMarginPx = params.preloadMarginPx ?? HISTORY_PRELOAD_MARGIN_PX
+    if (params.scrollHeight <= params.clientHeight + 1) {
+        return true
+    }
+    return params.sentinelBottom >= params.viewportTop - preloadMarginPx
+        && params.sentinelTop <= params.viewportTop + preloadMarginPx
+}
+
+export function getHistoryCoverageRetryDelay(deadline: number, now: number): number {
+    return Math.max(0, deadline - now) + 16
 }
 
 function NewMessagesIndicator(props: { count: number; onClick: () => void }) {
@@ -223,9 +308,10 @@ export function ConversationOutlinePanel(props: {
 
     return (
         <aside
-            className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[24rem] flex-col border-l border-[var(--app-border)] bg-[var(--app-bg)] shadow-2xl sm:w-[24rem]"
+            className="absolute inset-y-0 right-0 z-30 flex w-full max-w-[24rem] flex-col bg-[var(--app-bg)] shadow-2xl sm:w-[24rem]"
             aria-label={t('session.outline.title')}
         >
+            <div aria-hidden="true" className="pointer-events-none absolute inset-y-0 -left-px w-px bg-[var(--app-border)]" />
             <div className="border-b border-[var(--app-border)] p-3">
                 <div className="flex items-center gap-2">
                     <div className="relative min-w-0 flex-1">
@@ -271,15 +357,16 @@ export function ConversationOutlinePanel(props: {
                             )}
                         </Button>
                     ) : null}
-                    <button
+                    <Button
+                        variant="outline"
                         type="button"
                         onClick={props.onClose}
                         aria-label={t('button.close')}
                         title={t('button.close')}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                        className="h-9 w-9 shrink-0 px-0"
                     >
                         <CloseIcon className="h-4 w-4" />
-                    </button>
+                    </Button>
                 </div>
                 {normalizedSearchQuery.length > 0 ? (
                     <div className="mt-1.5 text-right text-xs text-[var(--app-hint)]" aria-live="polite">
@@ -336,51 +423,139 @@ export function ConversationOutlinePanel(props: {
 
 export function HappyThread(props: {
     api: ApiClient
+    session: Session
+    serviceTier?: string | null
     sessionId: string
     metadata: SessionMetadataSummary | null
     disabled: boolean
     onRefresh: () => void
     onRetryMessage?: (localId: string) => void
-    onFlushPending: () => void
-    onAtBottomChange: (atBottom: boolean) => void
-    isLoadingMessages: boolean
+    historyActionPending?: boolean
+    onForkConversation?: (messageLocalId?: string) => Promise<void>
+    onRewindConversation?: (messageLocalId: string) => Promise<void>
+    isLatestCompletedBoundary?: (messageId: string) => boolean
+    onViewModeChange: (mode: 'tail' | 'history') => void
+    isSyncingTail: boolean
     messagesWarning: string | null
     hasMoreMessages: boolean
     isLoadingMoreMessages: boolean
-    onLoadMore: () => Promise<unknown>
-    pendingCount: number
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    onCancelLoadMore: () => void
+    unseenCount: number
     rawMessagesCount: number
     normalizedMessagesCount: number
     messagesVersion: number
+    historyVersion: number
     forceScrollToken: number
     outlineOpen: boolean
     outlineItems: readonly ConversationOutlineItem[]
     onOutlineOpenChange: (open: boolean) => void
     onOutlineItemClick?: (item: ConversationOutlineItem) => void
 }) {
-    const { t } = useTranslation()
+    const { t, locale } = useTranslation()
+    const { preferences: headerMetadata } = useSessionHeaderMetadata()
+    const { machines } = useMachines(props.api, true)
+    const machineLabelsById = useMachineLabels(machines)
+    const [shareTurn, setShareTurn] = useState<ShareTurnState>(null)
+    const shareDialogOpen = shareTurn !== null
+    const shareRelativeTimeTick = useMinuteTick(headerMetadata.lastActive && shareDialogOpen)
+    const shareMetadataItems = useMemo(() => {
+        const agentFlavor = props.session.metadata?.flavor ?? null
+        const agentLabel = agentFlavor?.trim() || null
+        const machineLabel = resolveSessionHeaderMachineLabel(props.session, machineLabelsById)
+        const modelLabel = getSessionModelLabel(props.session)
+        const reasoningLabel = getShareTurnReasoningLabel(
+            agentFlavor,
+            props.session.modelReasoningEffort,
+            props.session.effort,
+            headerMetadata.showLabels
+        )
+        const lastActiveAt = props.session.activeAt || props.session.updatedAt || props.session.createdAt
+        const lastActiveLabel = lastActiveAt > 0 ? formatRelativeTime(lastActiveAt, t) : null
+        const createdAtLabel = formatSessionHeaderTimestamp(props.session.createdAt, locale)
+        const updatedAtLabel = formatSessionHeaderTimestamp(props.session.updatedAt, locale)
+        const worktreeBranch = props.session.metadata?.worktree?.branch?.trim() || null
+        const showFastBadge = agentFlavor === 'codex'
+            && isFastServiceTier(props.serviceTier ?? props.session.serviceTier)
+
+        return selectShareTurnMetadata(headerMetadata, {
+            agent: agentLabel ? { text: agentLabel, flavor: agentFlavor } : undefined,
+            machine: machineLabel ? {
+                text: `${headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}${machineLabel}`,
+            } : undefined,
+            lastActive: lastActiveLabel ? { text: lastActiveLabel } : undefined,
+            model: modelLabel ? {
+                text: `${headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}${modelLabel.value}`,
+            } : undefined,
+            reasoning: reasoningLabel ? { text: reasoningLabel } : undefined,
+            fastMode: showFastBadge ? { text: 'fast' } : undefined,
+            createdAt: createdAtLabel ? {
+                text: `${headerMetadata.showLabels ? `${t('session.header.createdAt')}: ` : ''}${createdAtLabel}`,
+            } : undefined,
+            updatedAt: updatedAtLabel ? {
+                text: `${headerMetadata.showLabels ? `${t('session.header.updatedAt')}: ` : ''}${updatedAtLabel}`,
+            } : undefined,
+            worktree: worktreeBranch ? {
+                text: `${headerMetadata.showLabels ? `${t('session.item.worktree')}: ` : ''}${worktreeBranch}`,
+            } : undefined,
+        })
+    }, [headerMetadata, locale, machineLabelsById, props.serviceTier, props.session, shareDialogOpen, shareRelativeTimeTick, t])
     const { terminalToolDisplayMode } = useTerminalToolDisplayMode()
+    const runtimeExtras = useAuiState((s) => s.thread.extras) as HappyRuntimeExtras | undefined
+    const appliedMessagesVersion = runtimeExtras?.messagesVersion ?? props.messagesVersion
+    const appliedHistoryVersion = runtimeExtras?.historyVersion ?? props.historyVersion
     const viewportRef = useRef<HTMLDivElement | null>(null)
     const contentRef = useRef<HTMLDivElement | null>(null)
-    const [shareTurn, setShareTurn] = useState<ShareTurnState>(null)
+    const [pullToLoadState, setPullToLoadState] = useState<PullToLoadState>('idle')
+    const pullToLoadStateRef = useRef<PullToLoadState>('idle')
     const shareTurnIdRef = useRef(0)
     const topSentinelRef = useRef<HTMLDivElement | null>(null)
-    const loadLockRef = useRef(false)
     const pendingScrollRef = useRef<PendingScrollRestore | null>(null)
-    const prevLoadingMoreRef = useRef(false)
-    const loadStartedRef = useRef(false)
     const isLoadingMoreRef = useRef(props.isLoadingMoreMessages)
     const hasMoreMessagesRef = useRef(props.hasMoreMessages)
-    const isLoadingMessagesRef = useRef(props.isLoadingMessages)
-    const messagesVersionRef = useRef(props.messagesVersion)
+    const isSyncingTailRef = useRef(props.isSyncingTail)
     const onLoadMoreRef = useRef(props.onLoadMore)
-    const handleLoadMoreRef = useRef<() => void>(() => {})
-    const pendingLoadPromiseRef = useRef<Promise<boolean> | null>(null)
-    const pendingLoadResolveRef = useRef<((value: boolean) => void) | null>(null)
-    const pendingLoadBaselineRef = useRef<{ messagesVersion: number; hasMoreMessages: boolean } | null>(null)
+    const onCancelLoadMoreRef = useRef(props.onCancelLoadMore)
+    const pendingLoadPromiseRef = useRef<Promise<OlderHistoryLoadResult> | null>(null)
+    const pendingLoadResolveRef = useRef<((value: OlderHistoryLoadResult) => void) | null>(null)
+    const coverageCheckTimerRef = useRef<number | null>(null)
+    const failureRetryTimerRef = useRef<number | null>(null)
+    const historyLoaderRef = useRef<HistoryLoaderState>({
+        runId: 0,
+        phase: 'idle',
+        source: null,
+        failureCount: 0,
+        autoPaused: false
+    })
+
+    useLayoutEffect(() => {
+        const viewport = viewportRef.current
+        if (!viewport) return
+
+        const updateScrollbarGutter = () => {
+            const supportsStableBothEdges = typeof CSS !== 'undefined'
+                && typeof CSS.supports === 'function'
+                && CSS.supports('scrollbar-gutter: stable both-edges')
+            const gutter = supportsStableBothEdges
+                ? Math.max(0, (viewport.offsetWidth - viewport.clientWidth) / 2)
+                : 0
+            viewport.style.setProperty('--chat-scroll-gutter-inline', `${gutter}px`)
+        }
+
+        updateScrollbarGutter()
+        if (typeof ResizeObserver === 'undefined') return
+
+        const observer = new ResizeObserver(updateScrollbarGutter)
+        observer.observe(viewport)
+        return () => observer.disconnect()
+    }, [])
+    const requestOlderRef = useRef<(source: HistoryLoadSource) => Promise<OlderHistoryLoadResult>>(
+        () => Promise.resolve('transient-stop')
+    )
+    const startHistoryLoadAttemptRef = useRef<(runId: number) => void>(() => {})
+    const needsViewportCoverageRef = useRef<() => boolean>(() => false)
     const atBottomRef = useRef(true)
-    const onAtBottomChangeRef = useRef(props.onAtBottomChange)
-    const onFlushPendingRef = useRef(props.onFlushPending)
+    const onViewModeChangeRef = useRef(props.onViewModeChange)
     const forceScrollTokenRef = useRef(props.forceScrollToken)
     const lastScrollTopRef = useRef(0)
     const sessionIdRef = useRef(props.sessionId)
@@ -391,23 +566,20 @@ export function HappyThread(props: {
     // Smart scroll state: enabled only while the user is intentionally at the bottom.
     const autoScrollEnabledRef = useRef(true)
     useEffect(() => {
-        onAtBottomChangeRef.current = props.onAtBottomChange
-    }, [props.onAtBottomChange])
-    useEffect(() => {
-        onFlushPendingRef.current = props.onFlushPending
-    }, [props.onFlushPending])
+        onViewModeChangeRef.current = props.onViewModeChange
+    }, [props.onViewModeChange])
     useEffect(() => {
         hasMoreMessagesRef.current = props.hasMoreMessages
     }, [props.hasMoreMessages])
     useEffect(() => {
-        isLoadingMessagesRef.current = props.isLoadingMessages
-    }, [props.isLoadingMessages])
-    useEffect(() => {
-        messagesVersionRef.current = props.messagesVersion
-    }, [props.messagesVersion])
+        isSyncingTailRef.current = props.isSyncingTail
+    }, [props.isSyncingTail])
     useEffect(() => {
         onLoadMoreRef.current = props.onLoadMore
     }, [props.onLoadMore])
+    useEffect(() => {
+        onCancelLoadMoreRef.current = props.onCancelLoadMore
+    }, [props.onCancelLoadMore])
 
     useEffect(() => {
         sessionIdRef.current = props.sessionId
@@ -424,24 +596,53 @@ export function HappyThread(props: {
         initialScrollTimersRef.current = []
     }, [])
 
-    const settlePendingLoad = useCallback((result: boolean) => {
+    const clearCoverageCheckTimer = useCallback(() => {
+        if (coverageCheckTimerRef.current !== null) {
+            window.clearTimeout(coverageCheckTimerRef.current)
+            coverageCheckTimerRef.current = null
+        }
+    }, [])
+
+    const clearFailureRetryTimer = useCallback(() => {
+        if (failureRetryTimerRef.current !== null) {
+            window.clearTimeout(failureRetryTimerRef.current)
+            failureRetryTimerRef.current = null
+        }
+    }, [])
+
+    const settlePendingLoad = useCallback((result: OlderHistoryLoadResult) => {
         const resolve = pendingLoadResolveRef.current
-        const baseline = pendingLoadBaselineRef.current
         pendingLoadResolveRef.current = null
         pendingLoadPromiseRef.current = null
-        pendingLoadBaselineRef.current = null
-        if (!resolve) {
-            return
-        }
-        if (!result || !baseline) {
-            resolve(result)
-            return
-        }
-        resolve(
-            messagesVersionRef.current !== baseline.messagesVersion
-            || hasMoreMessagesRef.current !== baseline.hasMoreMessages
-        )
+        resolve?.(result)
     }, [])
+
+    const cancelActiveHistoryLoad = useCallback(() => {
+        const state = historyLoaderRef.current
+        // `awaiting-render` is pre-armed by onBeforeApply and published with an
+        // immediate store notification, so browser input cannot observe the
+        // old DOM after trimming. Only network/backoff work is cancellable.
+        if (
+            state.source === 'consumer'
+            || (state.phase !== 'loading' && state.phase !== 'backoff')
+        ) {
+            return
+        }
+        onCancelLoadMoreRef.current()
+        isLoadingMoreRef.current = false
+        pendingScrollRef.current = null
+        clearCoverageCheckTimer()
+        clearFailureRetryTimer()
+        historyLoaderRef.current = {
+            ...state,
+            runId: state.runId + 1,
+            phase: 'idle',
+            source: null,
+            failureCount: 0,
+            autoPaused: true
+        }
+        settlePendingLoad('transient-stop')
+    }, [clearCoverageCheckTimer, clearFailureRetryTimer, settlePendingLoad])
 
     // Track scroll position to toggle autoScroll (stable listener using refs)
     useEffect(() => {
@@ -462,10 +663,43 @@ export function HappyThread(props: {
                 return
             }
             atBottomRef.current = atBottom
-            onAtBottomChangeRef.current(atBottom)
-            if (atBottom) {
-                onFlushPendingRef.current()
+            onViewModeChangeRef.current(atBottom ? 'tail' : 'history')
+        }
+
+        let pointerResumeActive = false
+        let pointerResumeUntil = 0
+        let pointerResumeLatched = false
+        let keyboardResumeUntil = 0
+        let lastWheelAt = 0
+        let wheelIntentUntil = 0
+        let wheelLatched = false
+
+        const hasExplicitUpwardIntent = (intent: ScrollIntent): boolean => {
+            return intent.isScrollingUp && (
+                pointerResumeActive
+                || pointerResumeUntil >= Date.now()
+                || keyboardResumeUntil >= Date.now()
+                || wheelIntentUntil >= Date.now()
+            )
+        }
+
+        const consumeExplicitUpwardIntent = (intent: ScrollIntent): boolean => {
+            if (!hasExplicitUpwardIntent(intent)) {
+                return false
             }
+            if ((pointerResumeActive || pointerResumeUntil >= Date.now()) && !pointerResumeLatched) {
+                pointerResumeLatched = true
+                return true
+            }
+            if (keyboardResumeUntil >= Date.now()) {
+                keyboardResumeUntil = 0
+                return true
+            }
+            if (wheelIntentUntil >= Date.now() && !wheelLatched) {
+                wheelLatched = true
+                return true
+            }
+            return false
         }
 
         const handleScroll = () => {
@@ -477,14 +711,49 @@ export function HappyThread(props: {
             })
             lastScrollTopRef.current = viewport.scrollTop
 
+            // A slow older-page request must not restore the position from
+            // when it started after the user has already scrolled elsewhere.
+            // Keep the pending baseline aligned with the latest visible row;
+            // the eventual prepend will preserve that row instead.
+            const pending = pendingScrollRef.current
+            if (pending && historyLoaderRef.current.runId === pending.runId) {
+                pending.anchor = captureScrollAnchor(viewport)
+                pending.scrollTop = viewport.scrollTop
+                pending.scrollHeight = viewport.scrollHeight
+            }
+
+            const needsCoverage = needsViewportCoverageRef.current()
+            if (!needsCoverage) {
+                // Older pages retain the oldest side of the bounded window.
+                // Once the user reverses toward newer history, applying this
+                // request could evict their new anchor. Invalidate it instead;
+                // a later fresh approach can request the page again.
+                cancelActiveHistoryLoad()
+            }
+            // Keep the keyboard/pointer intent armed while the user moves
+            // through ordinary history. Consume it only when the viewport
+            // actually reaches the preload area.
+            const hadExplicitUpwardIntent = hasExplicitUpwardIntent(intent)
+            const explicitUpwardIntent = needsCoverage && consumeExplicitUpwardIntent(intent)
+
             if (isInitialScrollSettling()) {
-                if (shouldCancelInitialScrollSettling(intent)) {
+                if (shouldCancelInitialScrollSettling(intent, hadExplicitUpwardIntent)) {
                     initialScrollDeadlineRef.current = 0
                     clearInitialScrollTimers()
                     setAutoScrollMode(false)
                     setAtBottomMode(false)
+                    if (explicitUpwardIntent) {
+                        void requestOlderRef.current('user')
+                    }
                 }
                 return
+            }
+
+            // Scroll position is the source of truth. The loader controller
+            // decides whether this demand may start a request; programmatic
+            // scroll events cannot bypass backoff or a paused coverage run.
+            if (needsCoverage) {
+                void requestOlderRef.current(explicitUpwardIntent ? 'user' : 'coverage')
             }
 
             if (intent.isScrollingUp && intent.distanceFromBottom > MANUAL_SCROLL_EPSILON_PX) {
@@ -503,8 +772,193 @@ export function HappyThread(props: {
             setAtBottomMode(false)
         }
 
+        // Gesture fallback: at scrollTop=0 no further scroll events fire. Give
+        // touch users progressive feedback, then load only when they release
+        // after crossing the threshold.
+        let pullStartY: number | null = null
+
+        const updatePullToLoadState = (state: PullToLoadState) => {
+            if (pullToLoadStateRef.current === state) {
+                return
+            }
+            pullToLoadStateRef.current = state
+            setPullToLoadState(state)
+        }
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            const target = event.target
+            if (
+                event.defaultPrevented
+                || event.repeat
+                || event.altKey
+                || event.ctrlKey
+                || event.metaKey
+                || !UPWARD_SCROLL_KEYS.has(event.key)
+                || target instanceof HTMLInputElement
+                || target instanceof HTMLTextAreaElement
+                || (target instanceof HTMLElement && target.isContentEditable)
+            ) {
+                return
+            }
+            keyboardResumeUntil = Date.now() + KEYBOARD_SCROLL_INTENT_WINDOW_MS
+            if (needsViewportCoverageRef.current()) {
+                keyboardResumeUntil = 0
+                void requestOlderRef.current('user')
+            }
+        }
+
+        const armPointerIntent = () => {
+            pointerResumeActive = true
+            pointerResumeUntil = 0
+            pointerResumeLatched = false
+        }
+
+        const handlePointerDown = (event: PointerEvent) => {
+            if (event.button !== 0) {
+                return
+            }
+            armPointerIntent()
+        }
+
+        const isInsideViewport = (clientX: number, clientY: number) => {
+            const rect = viewport.getBoundingClientRect()
+            return clientX >= rect.left
+                && clientX <= rect.right
+                && clientY >= rect.top
+                && clientY <= rect.bottom
+        }
+
+        // Native scrollbar interaction may bypass the viewport's own event
+        // listeners. Capture pointer and mouse input at the window boundary,
+        // then scope it back to the chat viewport by coordinates.
+        const handleWindowPointerDown = (event: PointerEvent) => {
+            if (event.button === 0 && isInsideViewport(event.clientX, event.clientY)) {
+                armPointerIntent()
+            }
+        }
+
+        const handleWindowMouseDown = (event: MouseEvent) => {
+            if (event.button === 0 && isInsideViewport(event.clientX, event.clientY)) {
+                armPointerIntent()
+            }
+        }
+
+        const clearPointerIntent = () => {
+            pointerResumeActive = false
+            pointerResumeUntil = 0
+            pointerResumeLatched = false
+        }
+
+        const handlePointerCancel = (event: PointerEvent) => {
+            const hadActivePointer = pointerResumeActive
+            pointerResumeActive = false
+            if (hadActivePointer && (event.pointerType === 'touch' || event.pointerType === 'pen')) {
+                // Native panning cancels the pointer before some mobile browsers
+                // dispatch the resulting scroll event. Retain that explicit input
+                // briefly so initial bottom-settling cannot reclaim the viewport.
+                pointerResumeUntil = Date.now() + POINTER_CANCEL_INTENT_WINDOW_MS
+                return
+            }
+            pointerResumeUntil = 0
+            pointerResumeLatched = false
+        }
+
+        const handleWheel = (event: WheelEvent) => {
+            if (event.deltaY >= 0) {
+                wheelIntentUntil = 0
+                return
+            }
+            // One trigger per gesture: a trackpad swipe is a burst of wheel
+            // events. Remember the gesture before the following scroll event
+            // so an approach from outside the preload area is also classified
+            // as explicit user intent.
+            const now = Date.now()
+            if (now - lastWheelAt > WHEEL_GESTURE_GAP_MS) {
+                wheelLatched = false
+            }
+            lastWheelAt = now
+            wheelIntentUntil = now + WHEEL_GESTURE_GAP_MS
+            if (!needsViewportCoverageRef.current() || wheelLatched) {
+                return
+            }
+            wheelLatched = true
+            void requestOlderRef.current('user')
+        }
+
+        const handleTouchStart = (event: TouchEvent) => {
+            updatePullToLoadState('idle')
+            pullStartY = (
+                viewport.scrollTop <= 0
+                && hasMoreMessagesRef.current
+                && !isSyncingTailRef.current
+                && !isLoadingMoreRef.current
+                && !pendingLoadPromiseRef.current
+            )
+                ? event.touches[0]?.clientY ?? null
+                : null
+        }
+
+        const handleTouchMove = (event: TouchEvent) => {
+            if (pullStartY === null) {
+                return
+            }
+            if (viewport.scrollTop > 0) {
+                pullStartY = null
+                updatePullToLoadState('idle')
+                return
+            }
+            const currentY = event.touches[0]?.clientY
+            if (currentY !== undefined) {
+                updatePullToLoadState(getPullToLoadState(currentY - pullStartY))
+            }
+        }
+
+        const handleTouchEnd = () => {
+            const shouldLoad = pullStartY !== null
+                && pullToLoadStateRef.current === 'ready'
+                && viewport.scrollTop <= 0
+            pullStartY = null
+            updatePullToLoadState('idle')
+            if (shouldLoad) {
+                void requestOlderRef.current('user')
+            }
+        }
+
+        const handleTouchCancel = () => {
+            pullStartY = null
+            updatePullToLoadState('idle')
+        }
+
         viewport.addEventListener('scroll', handleScroll, { passive: true })
-        return () => viewport.removeEventListener('scroll', handleScroll)
+        viewport.addEventListener('keydown', handleKeyDown)
+        viewport.addEventListener('pointerdown', handlePointerDown, { passive: true })
+        viewport.addEventListener('wheel', handleWheel, { passive: true })
+        viewport.addEventListener('touchstart', handleTouchStart, { passive: true })
+        viewport.addEventListener('touchmove', handleTouchMove, { passive: true })
+        viewport.addEventListener('touchend', handleTouchEnd, { passive: true })
+        viewport.addEventListener('touchcancel', handleTouchCancel, { passive: true })
+        window.addEventListener('pointerdown', handleWindowPointerDown, { capture: true, passive: true })
+        window.addEventListener('mousedown', handleWindowMouseDown, { capture: true, passive: true })
+        window.addEventListener('pointerup', clearPointerIntent, { passive: true })
+        window.addEventListener('mouseup', clearPointerIntent, { passive: true })
+        window.addEventListener('pointercancel', handlePointerCancel, { passive: true })
+        window.addEventListener('blur', clearPointerIntent)
+        return () => {
+            viewport.removeEventListener('scroll', handleScroll)
+            viewport.removeEventListener('keydown', handleKeyDown)
+            viewport.removeEventListener('pointerdown', handlePointerDown)
+            viewport.removeEventListener('wheel', handleWheel)
+            viewport.removeEventListener('touchstart', handleTouchStart)
+            viewport.removeEventListener('touchmove', handleTouchMove)
+            viewport.removeEventListener('touchend', handleTouchEnd)
+            viewport.removeEventListener('touchcancel', handleTouchCancel)
+            window.removeEventListener('pointerdown', handleWindowPointerDown, true)
+            window.removeEventListener('mousedown', handleWindowMouseDown, true)
+            window.removeEventListener('pointerup', clearPointerIntent)
+            window.removeEventListener('mouseup', clearPointerIntent)
+            window.removeEventListener('pointercancel', handlePointerCancel)
+            window.removeEventListener('blur', clearPointerIntent)
+        }
     }, []) // Stable: no dependencies, reads from refs
 
     const scrollToBottomInstant = useCallback(() => {
@@ -525,9 +979,8 @@ export function HappyThread(props: {
         autoScrollEnabledRef.current = true
         if (!atBottomRef.current) {
             atBottomRef.current = true
-            onAtBottomChangeRef.current(true)
+            onViewModeChangeRef.current('tail')
         }
-        onFlushPendingRef.current()
     }, [])
 
     // Reset state when session changes
@@ -535,25 +988,36 @@ export function HappyThread(props: {
         autoScrollEnabledRef.current = true
         lastScrollTopRef.current = viewportRef.current?.scrollTop ?? 0
         atBottomRef.current = true
-        onAtBottomChangeRef.current(true)
-        // Re-entry forces the thread to the bottom, so release anything the
-        // non-at-bottom cold load parked in pending — otherwise new messages
-        // stay invisible until the user manually scrolls to bottom.
-        onFlushPendingRef.current()
+        onViewModeChangeRef.current('tail')
         forceScrollTokenRef.current = props.forceScrollToken
         pendingScrollRef.current = null
-        loadLockRef.current = false
-        loadStartedRef.current = false
+        pullToLoadStateRef.current = 'idle'
+        setPullToLoadState('idle')
+        historyLoaderRef.current = {
+            runId: historyLoaderRef.current.runId + 1,
+            phase: 'idle',
+            source: null,
+            failureCount: 0,
+            autoPaused: false
+        }
         initialScrollSessionRef.current = null
         initialScrollDeadlineRef.current = 0
         clearInitialScrollTimers()
-        settlePendingLoad(false)
-    }, [props.sessionId, clearInitialScrollTimers, settlePendingLoad])
+        clearCoverageCheckTimer()
+        clearFailureRetryTimer()
+        settlePendingLoad('transient-stop')
+    }, [
+        props.sessionId,
+        clearInitialScrollTimers,
+        clearCoverageCheckTimer,
+        clearFailureRetryTimer,
+        settlePendingLoad
+    ])
 
     useLayoutEffect(() => {
         if (
             initialScrollSessionRef.current === props.sessionId
-            || props.isLoadingMessages
+            || props.isSyncingTail
             || props.rawMessagesCount === 0
             || pendingScrollRef.current
         ) {
@@ -563,8 +1027,7 @@ export function HappyThread(props: {
         initialScrollSessionRef.current = props.sessionId
         autoScrollEnabledRef.current = true
         atBottomRef.current = true
-        onAtBottomChangeRef.current(true)
-        onFlushPendingRef.current()
+        onViewModeChangeRef.current('tail')
         scrollToBottomInstant()
 
         initialScrollDeadlineRef.current = Date.now() + INITIAL_SCROLL_SETTLE_MS
@@ -581,7 +1044,7 @@ export function HappyThread(props: {
         }, delay))
     }, [
         props.sessionId,
-        props.isLoadingMessages,
+        props.isSyncingTail,
         props.rawMessagesCount,
         props.messagesVersion,
         scrollToBottomInstant,
@@ -590,10 +1053,13 @@ export function HappyThread(props: {
 
     useEffect(() => {
         return () => {
+            historyLoaderRef.current.runId += 1
             clearInitialScrollTimers()
-            settlePendingLoad(false)
+            clearCoverageCheckTimer()
+            clearFailureRetryTimer()
+            settlePendingLoad('transient-stop')
         }
-    }, [clearInitialScrollTimers, settlePendingLoad])
+    }, [clearInitialScrollTimers, clearCoverageCheckTimer, clearFailureRetryTimer, settlePendingLoad])
 
     useEffect(() => {
         if (forceScrollTokenRef.current === props.forceScrollToken) {
@@ -603,77 +1069,260 @@ export function HappyThread(props: {
         scrollToBottom()
     }, [props.forceScrollToken, scrollToBottom])
 
-    const loadOlderPreservingScroll = useCallback((): Promise<boolean> => {
+    const needsViewportCoverage = useCallback((): boolean => {
+        const viewport = viewportRef.current
+        const sentinel = topSentinelRef.current
+        if (!viewport || !sentinel) {
+            return false
+        }
+        const viewportRect = viewport.getBoundingClientRect()
+        const sentinelRect = sentinel.getBoundingClientRect()
+        return shouldLoadOlderForViewport({
+            scrollHeight: viewport.scrollHeight,
+            clientHeight: viewport.clientHeight,
+            viewportTop: viewportRect.top,
+            sentinelTop: sentinelRect.top,
+            sentinelBottom: sentinelRect.bottom
+        })
+    }, [])
+    needsViewportCoverageRef.current = needsViewportCoverage
+
+    const scheduleCoverageAfterSettling = useCallback(() => {
+        clearCoverageCheckTimer()
+        if (historyLoaderRef.current.autoPaused) {
+            return
+        }
+        const delay = getHistoryCoverageRetryDelay(initialScrollDeadlineRef.current, Date.now())
+        coverageCheckTimerRef.current = window.setTimeout(() => {
+            coverageCheckTimerRef.current = null
+            if (needsViewportCoverage()) {
+                void requestOlderRef.current('coverage')
+            }
+        }, delay)
+    }, [clearCoverageCheckTimer, needsViewportCoverage])
+
+    const startHistoryLoadAttempt = useCallback((runId: number): void => {
+        const state = historyLoaderRef.current
+        if (state.runId !== runId || !pendingLoadPromiseRef.current) {
+            return
+        }
+        const finishStoppedAttempt = (
+            current: HistoryLoaderState,
+            result: Exclude<OlderHistoryLoadResult, 'loaded'>,
+            autoPaused = current.autoPaused
+        ) => {
+            clearFailureRetryTimer()
+            pendingScrollRef.current = null
+            historyLoaderRef.current = {
+                ...current,
+                phase: 'idle',
+                source: null,
+                failureCount: 0,
+                autoPaused
+            }
+            settlePendingLoad(result)
+            if (
+                result === 'transient-stop'
+                && !isSyncingTailRef.current
+                && !isLoadingMoreRef.current
+            ) {
+                scheduleCoverageAfterSettling()
+            }
+        }
+
+        if (state.source !== 'consumer' && !needsViewportCoverage()) {
+            finishStoppedAttempt(state, 'transient-stop')
+            return
+        }
+        if (isSyncingTailRef.current || isLoadingMoreRef.current) {
+            finishStoppedAttempt(state, 'transient-stop')
+            return
+        }
+        if (!hasMoreMessagesRef.current) {
+            finishStoppedAttempt(state, 'terminal-stop', true)
+            return
+        }
+
+        const viewport = viewportRef.current
+        if (!viewport) {
+            finishStoppedAttempt(state, 'transient-stop')
+            return
+        }
+
+        clearFailureRetryTimer()
+        pendingScrollRef.current = {
+            runId,
+            anchor: captureScrollAnchor(viewport),
+            scrollTop: viewport.scrollTop,
+            scrollHeight: viewport.scrollHeight,
+            targetHistoryVersion: null
+        }
+        autoScrollEnabledRef.current = false
+        historyLoaderRef.current = { ...state, phase: 'loading' }
+
+        void (async () => {
+            let outcome: OlderLoadOutcome
+            try {
+                outcome = await onLoadMoreRef.current((historyVersion) => {
+                    const current = historyLoaderRef.current
+                    const pending = pendingScrollRef.current
+                    if (
+                        current.runId !== runId
+                        || !pendingLoadPromiseRef.current
+                        || !pending
+                        || pending.runId !== runId
+                    ) {
+                        return false
+                    }
+                    if (current.source !== 'consumer' && !needsViewportCoverage()) {
+                        return false
+                    }
+                    pending.targetHistoryVersion = historyVersion
+                    historyLoaderRef.current = { ...current, phase: 'awaiting-render' }
+                    return true
+                })
+            } catch (error) {
+                outcome = {
+                    kind: 'failed',
+                    error: error instanceof Error
+                        ? error
+                        : new Error('Failed to load older messages')
+                }
+            }
+
+            const current = historyLoaderRef.current
+            if (current.runId !== runId || !pendingLoadPromiseRef.current) {
+                return
+            }
+
+            if (outcome.kind === 'applied') {
+                const pending = pendingScrollRef.current
+                if (!pending || pending.runId !== runId) {
+                    finishStoppedAttempt(current, 'transient-stop')
+                    return
+                }
+                pending.targetHistoryVersion = outcome.historyVersion
+                historyLoaderRef.current = { ...current, phase: 'awaiting-render' }
+                return
+            }
+
+            pendingScrollRef.current = null
+            if (outcome.kind === 'failed') {
+                const failureCount = current.failureCount + 1
+                console.error('Failed to load older messages:', outcome.error)
+                if (failureCount <= MAX_COVERAGE_LOAD_RETRIES) {
+                    historyLoaderRef.current = {
+                        ...current,
+                        phase: 'backoff',
+                        failureCount
+                    }
+                    const delay = COVERAGE_FAILURE_RETRY_DELAY_MS * failureCount
+                    failureRetryTimerRef.current = window.setTimeout(() => {
+                        failureRetryTimerRef.current = null
+                        const retryState = historyLoaderRef.current
+                        if (retryState.runId !== runId || retryState.phase !== 'backoff') {
+                            return
+                        }
+                        startHistoryLoadAttemptRef.current(runId)
+                    }, delay)
+                    return
+                }
+                finishStoppedAttempt(current, 'terminal-stop', true)
+                return
+            }
+
+            const terminalStop = outcome.reason === 'epoch-reset'
+                || outcome.reason === 'exhausted'
+                || outcome.reason === 'unavailable'
+            finishStoppedAttempt(
+                current,
+                terminalStop ? 'terminal-stop' : 'transient-stop',
+                terminalStop ? true : current.autoPaused
+            )
+        })()
+    }, [
+        clearFailureRetryTimer,
+        needsViewportCoverage,
+        scheduleCoverageAfterSettling,
+        settlePendingLoad
+    ])
+    startHistoryLoadAttemptRef.current = startHistoryLoadAttempt
+
+    const requestOlder = useCallback((source: HistoryLoadSource): Promise<OlderHistoryLoadResult> => {
         if (pendingLoadPromiseRef.current) {
             return pendingLoadPromiseRef.current
         }
+
+        let state = historyLoaderRef.current
+        if (source === 'coverage') {
+            if (state.autoPaused) {
+                return Promise.resolve('terminal-stop')
+            }
+            if (isInitialScrollSettling() || !needsViewportCoverage()) {
+                return Promise.resolve('transient-stop')
+            }
+        } else {
+            // Explicit consumers must not be swallowed by the initial
+            // scroll-to-bottom settling window.
+            initialScrollDeadlineRef.current = 0
+            clearInitialScrollTimers()
+            if (source === 'user' && state.autoPaused) {
+                state = { ...state, autoPaused: false }
+                historyLoaderRef.current = state
+            }
+        }
+
         if (
-            isInitialScrollSettling()
-            || isLoadingMessagesRef.current
-            || !hasMoreMessagesRef.current
+            state.phase !== 'idle'
+            || isSyncingTailRef.current
             || isLoadingMoreRef.current
-            || loadLockRef.current
+            || !viewportRef.current
         ) {
-            return Promise.resolve(false)
+            return Promise.resolve('transient-stop')
         }
-        const viewport = viewportRef.current
-        if (!viewport) {
-            return Promise.resolve(false)
+        if (!hasMoreMessagesRef.current) {
+            return Promise.resolve('terminal-stop')
         }
-        pendingScrollRef.current = {
-            anchor: captureScrollAnchor(viewport),
-            scrollTop: viewport.scrollTop,
-            scrollHeight: viewport.scrollHeight
+
+        clearCoverageCheckTimer()
+        clearFailureRetryTimer()
+        const runId = state.runId + 1
+        historyLoaderRef.current = {
+            runId,
+            phase: 'loading',
+            source,
+            failureCount: 0,
+            autoPaused: source === 'user' ? false : state.autoPaused
         }
-        autoScrollEnabledRef.current = false
-        loadLockRef.current = true
-        loadStartedRef.current = false
-        pendingLoadBaselineRef.current = {
-            messagesVersion: messagesVersionRef.current,
-            hasMoreMessages: hasMoreMessagesRef.current
-        }
-        const loadPromise = new Promise<boolean>((resolve) => {
+        const loadPromise = new Promise<OlderHistoryLoadResult>((resolve) => {
             pendingLoadResolveRef.current = resolve
         })
         pendingLoadPromiseRef.current = loadPromise
-        try {
-            void onLoadMoreRef.current().catch((error) => {
-                pendingScrollRef.current = null
-                loadLockRef.current = false
-                settlePendingLoad(false)
-                console.error('Failed to load older messages:', error)
-            }).finally(() => {
-                if (!loadStartedRef.current && !isLoadingMoreRef.current) {
-                    if (pendingScrollRef.current) {
-                        pendingScrollRef.current = null
-                        loadLockRef.current = false
-                    }
-                    settlePendingLoad(true)
-                }
-            })
-        } catch (error) {
-            pendingScrollRef.current = null
-            loadLockRef.current = false
-            settlePendingLoad(false)
-            console.error('Failed to load older messages:', error)
-        }
+        startHistoryLoadAttemptRef.current(runId)
         return loadPromise
-    }, [isInitialScrollSettling, settlePendingLoad])
+    }, [
+        clearCoverageCheckTimer,
+        clearFailureRetryTimer,
+        clearInitialScrollTimers,
+        isInitialScrollSettling,
+        needsViewportCoverage
+    ])
+    requestOlderRef.current = requestOlder
 
-    const loadOlderFromUserAction = useCallback((): Promise<boolean> => {
-        // Initial settling protects the automatic top sentinel from racing the
-        // first scroll-to-bottom pass. It must not swallow an explicit click.
-        initialScrollDeadlineRef.current = 0
-        clearInitialScrollTimers()
-        return loadOlderPreservingScroll()
-    }, [clearInitialScrollTimers, loadOlderPreservingScroll])
+    const loadOlderFromConsumer = useCallback((): Promise<OlderHistoryLoadResult> => {
+        return requestOlder('consumer')
+    }, [requestOlder])
+
+    const loadOlderForOutline = useCallback(async (): Promise<boolean> => {
+        return await loadOlderFromConsumer() === 'loaded'
+    }, [loadOlderFromConsumer])
 
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
         const target = await locateOutlineTargetMessage({
             targetMessageId: item.targetMessageId,
             findTarget: (anchorId) => document.getElementById(anchorId),
             hasMoreMessages: () => hasMoreMessagesRef.current,
-            loadOlderPreservingScroll: loadOlderFromUserAction
+            loadOlderPreservingScroll: loadOlderForOutline
         })
         if (target) {
             target.scrollIntoView({ block: 'start', behavior: 'smooth' })
@@ -681,44 +1330,35 @@ export function HappyThread(props: {
         }
         props.onOutlineItemClick?.(item)
         props.onOutlineOpenChange(false)
-    }, [loadOlderFromUserAction, props.onOutlineItemClick, props.onOutlineOpenChange])
+    }, [loadOlderForOutline, props.onOutlineItemClick, props.onOutlineOpenChange])
 
     useEffect(() => {
-        handleLoadMoreRef.current = () => {
-            void loadOlderPreservingScroll()
-        }
-    }, [loadOlderPreservingScroll])
-
-    useEffect(() => {
-        const sentinel = topSentinelRef.current
-        const viewport = viewportRef.current
-        if (!sentinel || !viewport || !props.hasMoreMessages || props.isLoadingMessages) {
+        if (
+            !props.hasMoreMessages
+            || props.isSyncingTail
+            || props.isLoadingMoreMessages
+        ) {
+            clearCoverageCheckTimer()
             return
         }
-        if (typeof IntersectionObserver === 'undefined') {
+        if (!needsViewportCoverage()) {
             return
         }
-
-        const observer = new IntersectionObserver(
-            (entries) => {
-                for (const entry of entries) {
-                    if (entry.isIntersecting) {
-                        if (isInitialScrollSettling()) {
-                            continue
-                        }
-                        handleLoadMoreRef.current()
-                    }
-                }
-            },
-            {
-                root: viewport,
-                rootMargin: '200px 0px 0px 0px'
-            }
-        )
-
-        observer.observe(sentinel)
-        return () => observer.disconnect()
-    }, [props.hasMoreMessages, props.isLoadingMessages, isInitialScrollSettling])
+        if (isInitialScrollSettling()) {
+            scheduleCoverageAfterSettling()
+            return
+        }
+        void requestOlderRef.current('coverage')
+    }, [
+        props.hasMoreMessages,
+        props.isSyncingTail,
+        props.isLoadingMoreMessages,
+        props.messagesVersion,
+        isInitialScrollSettling,
+        needsViewportCoverage,
+        scheduleCoverageAfterSettling,
+        clearCoverageCheckTimer
+    ])
 
     useEffect(() => {
         const content = contentRef.current
@@ -737,10 +1377,25 @@ export function HappyThread(props: {
             ) {
                 scrollToBottomInstant()
             }
+            // Late content growth can leave the viewport near the top without
+            // a scroll event. Submit demand through the same controller; an
+            // in-flight load, backoff, or paused run remains exclusive.
+            if (!pendingScrollRef.current && needsViewportCoverage()) {
+                if (isInitialScrollSettling()) {
+                    scheduleCoverageAfterSettling()
+                } else {
+                    void requestOlderRef.current('coverage')
+                }
+            }
         })
         observer.observe(content)
         return () => observer.disconnect()
-    }, [scrollToBottomInstant])
+    }, [
+        scrollToBottomInstant,
+        isInitialScrollSettling,
+        needsViewportCoverage,
+        scheduleCoverageAfterSettling
+    ])
 
     useLayoutEffect(() => {
         const pending = pendingScrollRef.current
@@ -749,38 +1404,54 @@ export function HappyThread(props: {
             return
         }
         if (pending) {
+            if (
+                pending.targetHistoryVersion === null
+                || appliedHistoryVersion < pending.targetHistoryVersion
+            ) {
+                return
+            }
             const restoredByAnchor = pending.anchor ? restoreScrollAnchor(viewport, pending.anchor) : false
             if (!restoredByAnchor) {
                 const delta = viewport.scrollHeight - pending.scrollHeight
                 viewport.scrollTop = pending.scrollTop + delta
             }
+            const loaderState = historyLoaderRef.current
+            if (loaderState.runId !== pending.runId || loaderState.phase !== 'awaiting-render') {
+                pendingScrollRef.current = null
+                return
+            }
             lastScrollTopRef.current = viewport.scrollTop
             pendingScrollRef.current = null
-            loadLockRef.current = false
-            settlePendingLoad(true)
+            clearFailureRetryTimer()
+            historyLoaderRef.current = {
+                ...loaderState,
+                phase: 'idle',
+                source: null,
+                failureCount: 0,
+                // A completed page always consumes automatic demand. The next
+                // page requires renewed wheel/touch/keyboard/scrollbar intent;
+                // render, resize, and scroll-restoration events cannot chain it.
+                autoPaused: true
+            }
+            settlePendingLoad('loaded')
             return
         }
         if (atBottomRef.current && autoScrollEnabledRef.current) {
             scrollToBottomInstant()
         }
-    }, [props.messagesVersion, scrollToBottomInstant, settlePendingLoad])
+    }, [
+        appliedMessagesVersion,
+        appliedHistoryVersion,
+        scrollToBottomInstant,
+        settlePendingLoad,
+        clearFailureRetryTimer
+    ])
 
     useEffect(() => {
         isLoadingMoreRef.current = props.isLoadingMoreMessages
-        if (props.isLoadingMoreMessages) {
-            loadStartedRef.current = true
-        }
-        if (prevLoadingMoreRef.current && !props.isLoadingMoreMessages) {
-            if (pendingScrollRef.current) {
-                pendingScrollRef.current = null
-                loadLockRef.current = false
-            }
-            settlePendingLoad(true)
-        }
-        prevLoadingMoreRef.current = props.isLoadingMoreMessages
-    }, [props.isLoadingMoreMessages, settlePendingLoad])
+    }, [props.isLoadingMoreMessages])
 
-    const showSkeleton = props.isLoadingMessages && props.rawMessagesCount === 0 && props.pendingCount === 0
+    const showSkeleton = props.isSyncingTail && props.rawMessagesCount === 0
     const handleShareTurn = useCallback((
         messageTarget: HTMLElement | string | null,
         clientY?: number,
@@ -788,6 +1459,9 @@ export function HappyThread(props: {
     ) => {
         const content = contentRef.current
         if (!content) return
+        const messageContainer = content.querySelector<HTMLElement>('.happy-thread-messages')
+        const sourceContentWidth = messageContainer?.getBoundingClientRect().width
+            ?? content.getBoundingClientRect().width
 
         let target: HTMLElement | null = typeof messageTarget === 'string'
             ? document.getElementById(messageTarget)
@@ -800,7 +1474,7 @@ export function HappyThread(props: {
                 id: ++shareTurnIdRef.current,
                 snapshots: fallbackSnapshot ? [fallbackSnapshot] : [],
                 title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
-                subtitle: [props.metadata?.flavor, props.metadata?.host].filter(Boolean).join(' · ') || props.sessionId
+                sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
             })
             return
         }
@@ -844,7 +1518,7 @@ export function HappyThread(props: {
             id: ++shareTurnIdRef.current,
             snapshots: completeSnapshots,
             title: props.metadata?.summary?.text ?? props.metadata?.name ?? props.metadata?.path ?? props.sessionId.slice(0, 8),
-            subtitle: [props.metadata?.flavor, props.metadata?.host].filter(Boolean).join(' · ') || props.sessionId
+            sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
         })
     }, [props.metadata, props.sessionId])
 
@@ -857,12 +1531,37 @@ export function HappyThread(props: {
             disabled: props.disabled,
             onRefresh: props.onRefresh,
             onRetryMessage: props.onRetryMessage,
+            historyActionPending: props.historyActionPending,
+            onForkConversation: props.onForkConversation,
+            onRewindConversation: props.onRewindConversation,
+            isLatestCompletedBoundary: props.isLatestCompletedBoundary,
             onShareTurn: handleShareTurn,
             hasMoreMessages: props.hasMoreMessages,
+            isSyncingTail: props.isSyncingTail,
             isLoadingMoreMessages: props.isLoadingMoreMessages,
-            loadOlderMessagesPreservingScroll: loadOlderFromUserAction
+            loadOlderMessagesPreservingScroll: loadOlderFromConsumer
         }}>
             <ThreadPrimitive.Root className="flex min-h-0 flex-1 flex-col relative">
+                {!props.isSyncingTail && (
+                    props.isLoadingMoreMessages || pullToLoadState !== 'idle'
+                ) ? (
+                    <div
+                        role="status"
+                        aria-live="polite"
+                        className="pointer-events-none absolute left-1/2 top-3 z-20 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-[var(--app-border)] bg-[var(--app-bg)]/90 px-2.5 py-1 text-xs text-[var(--app-hint)] shadow-sm backdrop-blur"
+                    >
+                        {props.isLoadingMoreMessages ? (
+                            <Spinner size="sm" label={null} className="text-current" />
+                        ) : null}
+                        <span>
+                            {props.isLoadingMoreMessages
+                                ? t('misc.loading')
+                                : pullToLoadState === 'ready'
+                                    ? t('misc.releaseToLoadOlder')
+                                    : t('misc.pullToLoadOlder')}
+                        </span>
+                    </div>
+                ) : null}
                 <ThreadPrimitive.Viewport
                     asChild
                     autoScroll={false}
@@ -870,8 +1569,12 @@ export function HappyThread(props: {
                     scrollToBottomOnRunStart={false}
                     scrollToBottomOnThreadSwitch={false}
                 >
-                    <div ref={viewportRef} className="app-scroll-y min-h-0 flex-1 overflow-x-hidden">
-                        <div ref={contentRef} className="mx-auto w-full max-w-content min-w-0 p-3">
+                    <div
+                        ref={viewportRef}
+                        className="app-scroll-y chat-scroll-y min-h-0 flex-1 overflow-x-hidden"
+                        tabIndex={0}
+                    >
+                        <div ref={contentRef} className="chat-scroll-content mx-auto w-full max-w-content min-w-0 p-3">
                             <div ref={topSentinelRef} className="h-px w-full" aria-hidden="true" />
                             {showSkeleton ? (
                                 <MessageSkeleton />
@@ -880,35 +1583,6 @@ export function HappyThread(props: {
                                     {props.messagesWarning ? (
                                         <div className="mb-3 rounded-md bg-amber-500/10 p-2 text-xs">
                                             {props.messagesWarning}
-                                        </div>
-                                    ) : null}
-
-                                    {props.hasMoreMessages && !props.isLoadingMessages ? (
-                                        <div className="py-1 mb-2">
-                                            <div className="mx-auto w-fit">
-                                                <Button
-                                                    variant="outline"
-                                                    size="sm"
-                                                    onClick={() => {
-                                                        void loadOlderFromUserAction()
-                                                    }}
-                                                    disabled={props.isLoadingMoreMessages || props.isLoadingMessages}
-                                                    aria-busy={props.isLoadingMoreMessages}
-                                                    className="gap-1.5 text-xs opacity-80 hover:opacity-100"
-                                                >
-                                                    {props.isLoadingMoreMessages ? (
-                                                        <>
-                                                            <Spinner size="sm" label={null} className="text-current" />
-                                                            {t('misc.loading')}
-                                                        </>
-                                                    ) : (
-                                                        <>
-                                                            <span aria-hidden="true">↑</span>
-                                                            {t('misc.loadOlder')}
-                                                        </>
-                                                    )}
-                                                </Button>
-                                            </div>
                                         </div>
                                     ) : null}
 
@@ -925,7 +1599,7 @@ export function HappyThread(props: {
                         </div>
                     </div>
                 </ThreadPrimitive.Viewport>
-                <NewMessagesIndicator count={props.pendingCount} onClick={scrollToBottom} />
+                <NewMessagesIndicator count={props.unseenCount} onClick={scrollToBottom} />
                 {props.outlineOpen ? (
                     <>
                         <button
@@ -939,7 +1613,7 @@ export function HappyThread(props: {
                             hasMoreMessages={props.hasMoreMessages}
                             isLoadingMoreMessages={props.isLoadingMoreMessages}
                             onLoadMore={() => {
-                                void loadOlderFromUserAction()
+                                void loadOlderFromConsumer()
                             }}
                             onSelect={handleOutlineSelect}
                             onClose={() => props.onOutlineOpenChange(false)}
@@ -950,8 +1624,9 @@ export function HappyThread(props: {
                     key={shareTurn?.id ?? 'closed'}
                     isOpen={shareTurn !== null}
                     title={shareTurn?.title ?? ''}
-                    subtitle={shareTurn?.subtitle ?? ''}
+                    metadataItems={shareMetadataItems}
                     sourceSnapshots={shareTurn?.snapshots ?? []}
+                    sourceContentWidth={shareTurn?.sourceContentWidth ?? null}
                     onClose={() => setShareTurn(null)}
                 />
             </ThreadPrimitive.Root>

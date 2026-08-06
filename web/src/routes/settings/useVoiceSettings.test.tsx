@@ -1,18 +1,21 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook, waitFor } from '@testing-library/react'
+import type { TranscriptionProviderInfo } from '@hapi/protocol/voice'
 import { I18nProvider } from '@/lib/i18n-context'
 import { useVoiceSettings } from './useVoiceSettings'
 
-const { fetchVoiceBackend, fetchVoices, pause, play } = vi.hoisted(() => ({
+const { fetchTranscriptionProviders, fetchVoiceBackend, fetchVoices, pause, play } = vi.hoisted(() => ({
+    fetchTranscriptionProviders: vi.fn((): Promise<{ providers: TranscriptionProviderInfo[] }> => Promise.resolve({ providers: [] })),
     fetchVoiceBackend: vi.fn(),
     fetchVoices: vi.fn(),
     pause: vi.fn(),
     play: vi.fn(() => Promise.resolve()),
 }))
 
-vi.mock('@/lib/app-context', () => ({
-    useAppContext: () => ({ api: {} }),
-}))
+vi.mock('@/lib/app-context', () => {
+    const api = { fetchTranscriptionProviders }
+    return { useAppContext: () => ({ api }) }
+})
 
 vi.mock('@/api/voice', () => ({
     fetchVoiceBackend,
@@ -24,9 +27,16 @@ function Wrapper(props: { children: React.ReactNode }) {
 }
 
 describe('useVoiceSettings', () => {
+    afterEach(() => vi.unstubAllGlobals())
+
     beforeEach(() => {
         vi.clearAllMocks()
         localStorage.clear()
+        vi.stubGlobal('navigator', {
+            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/140.0 Safari/537.36',
+            userAgentData: { platform: 'macOS', mobile: false },
+            language: 'en-US'
+        })
         fetchVoiceBackend.mockResolvedValue({ backend: 'elevenlabs', backends: ['elevenlabs'] })
         fetchVoices.mockResolvedValue([])
         class MockAudio {
@@ -77,5 +87,44 @@ describe('useVoiceSettings', () => {
         expect(play).toHaveBeenCalledOnce()
         unmount()
         expect(pause).toHaveBeenCalled()
+    })
+
+    it('uses realtime for the realtime-only browser provider', async () => {
+        const available = vi.fn(() => Promise.resolve('available'))
+        class MockSpeechRecognition {
+            static available = available
+            processLocally = false
+        }
+        Object.defineProperty(MockSpeechRecognition.prototype, 'processLocally', { value: false })
+        vi.stubGlobal('SpeechRecognition', MockSpeechRecognition)
+        localStorage.setItem('hapi-transcription-mode', 'standard')
+
+        const { result } = renderHook(() => useVoiceSettings(), { wrapper: Wrapper })
+
+        await waitFor(() => expect(result.current.provider).toBe('browser-local'))
+        expect(result.current.transcriptionMode).toBe('realtime')
+        expect(available).not.toHaveBeenCalled()
+    })
+
+    it('does not probe browser-local speech availability when the language changes', async () => {
+        fetchTranscriptionProviders.mockResolvedValueOnce({
+            providers: [{ id: 'openai', label: 'OpenAI', modes: ['standard', 'realtime'] }]
+        })
+        const available = vi.fn(() => Promise.resolve('available'))
+        class MockSpeechRecognition {
+            static available = available
+            processLocally = false
+        }
+        Object.defineProperty(MockSpeechRecognition.prototype, 'processLocally', { value: false })
+        vi.stubGlobal('SpeechRecognition', MockSpeechRecognition)
+        localStorage.setItem('hapi-transcription-provider', 'browser-local')
+
+        const { result } = renderHook(() => useVoiceSettings(), { wrapper: Wrapper })
+
+        await waitFor(() => expect(result.current.provider).toBe('browser-local'))
+
+        act(() => result.current.setVoiceLanguage({ code: 'zh-CN', name: 'Chinese', nativeName: '中文' }))
+        expect(result.current.provider).toBe('browser-local')
+        expect(available).not.toHaveBeenCalled()
     })
 })

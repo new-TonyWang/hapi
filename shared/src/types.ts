@@ -31,6 +31,7 @@ export { AGENT_MESSAGE_PAYLOAD_TYPE } from './modes'
 
 export type {
     AgentFlavor,
+    AgyPermissionMode,
     ClaudePermissionMode,
     CodexCollaborationMode,
     CodexCollaborationModeOption,
@@ -39,6 +40,7 @@ export type {
     GeminiPermissionMode,
     GrokPermissionMode,
     KimiPermissionMode,
+    CopilotPermissionMode,
     OpencodePermissionMode,
     PermissionMode,
     PermissionModeOption,
@@ -46,3 +48,4 @@ export type {
 } from './modes'
 
 export type { ClaudeModelPreset, GeminiModelPreset } from './models'
+export type { CopilotAgentMode } from './copilotModes'

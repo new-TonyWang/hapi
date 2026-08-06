@@ -15,8 +15,19 @@ function calculateContextSize(usage: UsageData): number {
     return (usage.cache_creation_input_tokens || 0) + (usage.cache_read_input_tokens || 0) + usage.input_tokens
 }
 
-function isUsageVisibleInParentContext(usage: UsageData): boolean {
-    return usage.scope_role !== 'child'
+/**
+ * Whether a message's usage describes the *parent* thread's context.
+ *
+ * A Task subagent runs with its own, much smaller context, so letting its usage
+ * through makes the status bar's numerator collapse mid-run and snap back when
+ * the parent resumes. `scope_role` alone cannot catch this: Claude never stamps
+ * it (see sdkToLogConverter.ts), and Codex drops child `token_count` events in
+ * the CLI before they reach us — so the guard never actually fires on any path.
+ * `isSidechain` is the signal that survives both.
+ */
+function isUsageVisibleInParentContext(msg: NormalizedMessage): boolean {
+    if (msg.isSidechain) return false
+    return msg.usage?.scope_role !== 'child'
 }
 
 export type LatestUsage = {
@@ -26,6 +37,13 @@ export type LatestUsage = {
     cacheRead: number
     contextSize: number
     contextWindow: number | null
+    /**
+     * Model reported by the usage-bearing message itself. Local-mode Claude
+     * sessions often have session.model = null (the model is picked inside the
+     * TUI), so this is the only model signal available for the context-window
+     * heuristic when the usage carries no explicit context_window.
+     */
+    model: string | null
     timestamp: number
 }
 
@@ -160,7 +178,7 @@ export function reduceChatBlocks(
     let latestUsage: LatestUsage | null = null
     for (let i = normalized.length - 1; i >= 0; i--) {
         const msg = normalized[i]
-        if (msg.usage && isUsageVisibleInParentContext(msg.usage)) {
+        if (msg.usage && isUsageVisibleInParentContext(msg)) {
             latestUsage = {
                 inputTokens: msg.usage.input_tokens,
                 outputTokens: msg.usage.output_tokens,
@@ -168,6 +186,7 @@ export function reduceChatBlocks(
                 cacheRead: msg.usage.cache_read_input_tokens ?? 0,
                 contextSize: calculateContextSize(msg.usage),
                 contextWindow: msg.usage.context_window ?? null,
+                model: msg.model ?? null,
                 timestamp: msg.createdAt
             }
             break

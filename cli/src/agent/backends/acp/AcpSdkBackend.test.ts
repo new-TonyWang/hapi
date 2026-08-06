@@ -658,11 +658,12 @@ describe('AcpSdkBackend', () => {
                 return {
                     stopReason: 'end_turn',
                     usage: {
-                        totalTokens: 13_892,
+                        totalTokens: 13_897,
                         inputTokens: 8_119,
                         outputTokens: 2,
                         thoughtTokens: 11,
-                        cachedReadTokens: 5_760
+                        cachedReadTokens: 5_760,
+                        cachedWriteTokens: 5
                     }
                 };
             },
@@ -678,8 +679,9 @@ describe('AcpSdkBackend', () => {
             inputTokens: 8_119,
             outputTokens: 2,
             cacheReadTokens: 5_760,
+            cacheCreationTokens: 5,
             thoughtTokens: 11,
-            totalTokens: 13_892,
+            totalTokens: 13_897,
             contextTokens: 13_879,
             contextWindow: 65_536
         });
@@ -1138,5 +1140,218 @@ describe('AcpSdkBackend', () => {
         backend.registerExtensionRequestHandler('cursor/ask_question', handler);
 
         expect(registered.get('cursor/ask_question')).toBe(handler);
+    });
+
+    it('suppressUpdatesDuring drops session/update notifications that would otherwise leak into the previous turn\'s onUpdate, then restores normal forwarding', async () => {
+        // Reproduces the real /compact duplicate-summary bug: OpenCode keeps
+        // streaming session/update notifications (over the same ACP
+        // transport) while a raw-HTTP /compact call is in flight outside
+        // prompt(), and handleSessionUpdate forwards them unconditionally to
+        // whatever messageHandler is still installed from the last prompt()
+        // turn — rendering the same content a second time alongside the
+        // compact bridge's own explicit summary message.
+        //
+        // Fast quiet-drain timing so this test doesn't pay the real
+        // (production) 200ms/1200ms PRE_PROMPT_* delay suppressUpdatesDuring
+        // now waits through before restoring the handler.
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 5;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 50;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            messageHandler: unknown;
+        };
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        const turn1: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        const emitPlanUpdate = () => backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.plan,
+                entries: [{ content: 'leaked plan step', priority: 'medium', status: 'pending' }]
+            }
+        });
+
+        const handlerBeforeSuppression = backendInternal.messageHandler;
+        expect(handlerBeforeSuppression).not.toBeNull();
+
+        let handlerDuringSuppression: unknown = 'not-checked';
+        const result = await backend.suppressUpdatesDuring(async () => {
+            handlerDuringSuppression = backendInternal.messageHandler;
+            emitPlanUpdate();
+            return 'compact result';
+        });
+
+        expect(result).toBe('compact result');
+        expect(handlerDuringSuppression).toBeNull();
+        expect(turn1.some((m) => m.type === 'plan')).toBe(false);
+
+        // The previous turn's handler must be back in place afterward so
+        // ordinary straggler-forwarding (covered elsewhere) is unaffected.
+        expect(backendInternal.messageHandler).toBe(handlerBeforeSuppression);
+        emitPlanUpdate();
+        expect(turn1.some((m) => m.type === 'plan')).toBe(true);
+    });
+
+    it('waits for a quiet period (reusing the same drain prompt() uses before swapping handlers) before restoring the handler after suppressUpdatesDuring, so a late server-side straggler from an already-aborted operation cannot leak', async () => {
+        // Reproduces a hostile-review finding: aborting the client-side HTTP
+        // call (e.g. compactAbortController) does not mean the OpenCode
+        // server actually stopped the operation — session/update is a
+        // separate notification channel from that HTTP request's lifecycle.
+        // If suppressUpdatesDuring restored the handler the instant `fn`
+        // resolved, a straggler notification arriving moments later (while
+        // the server is still winding the operation down) would leak
+        // straight into the restored handler.
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 30;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 300;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (...args: unknown[]) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+            messageHandler: unknown;
+        };
+        backendInternal.transport = {
+            sendRequest: async () => ({ stopReason: 'end_turn' }),
+            close: async () => {}
+        };
+
+        const turn1: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'hi' }], (m) => turn1.push(m));
+
+        const emitPlanUpdate = () => backendInternal.handleSessionUpdate({
+            sessionId: 'session-1',
+            update: {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.plan,
+                entries: [{ content: 'late server-side straggler', priority: 'medium', status: 'pending' }]
+            }
+        });
+
+        const handlerBeforeSuppression = backendInternal.messageHandler;
+
+        const suppressPromise = backend.suppressUpdatesDuring(async () => {
+            // Client gives up almost immediately (mirrors compactAbortController
+            // firing), but the server keeps streaming for a little longer —
+            // one update right away, one more 15ms later.
+            emitPlanUpdate();
+            setTimeout(emitPlanUpdate, 15);
+            return 'aborted-early';
+        });
+
+        // Sampled while suppressUpdatesDuring's own returned promise is
+        // still pending (fn already resolved, but the quiet-drain in its
+        // `finally` has not) — this is what actually proves restoration is
+        // *deferred*, not merely eventually correct.
+        await sleep(20);
+        const handlerDuringDrainWindow = backendInternal.messageHandler;
+
+        const result = await suppressPromise;
+
+        expect(result).toBe('aborted-early');
+        expect(handlerDuringDrainWindow).toBeNull();
+        // Neither the immediate update nor the +15ms straggler leaked —
+        // messageHandler was null (suppressed) for both.
+        expect(turn1.some((m) => m.type === 'plan')).toBe(false);
+
+        expect(backendInternal.messageHandler).toBe(handlerBeforeSuppression);
+
+        // Normal forwarding resumes once actually restored.
+        emitPlanUpdate();
+        expect(turn1.some((m) => m.type === 'plan')).toBe(true);
+    });
+
+    it('does not let compact thought/text chunks escape through the next prompt pre-swap drain, while preserving the new prompt response', async () => {
+        // The reported duplicate was not emitted during /compact itself. In
+        // the pre-suppression implementation those chunks stayed in the old
+        // handler and prompt()'s next pre-swap drain emitted them as an
+        // ordinary assistant reply. This drives that exact backend path.
+        backendStatics.UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.UPDATE_DRAIN_TIMEOUT_MS = 20;
+        backendStatics.PRE_PROMPT_UPDATE_QUIET_PERIOD_MS = 1;
+        backendStatics.PRE_PROMPT_UPDATE_DRAIN_TIMEOUT_MS = 20;
+        backendStatics.LATE_FLUSH_INTERVAL_MS = 1;
+        backendStatics.LATE_FLUSH_QUIET_PERIOD_MS = 1;
+        backendStatics.LATE_FLUSH_WINDOW_MS = 20;
+
+        const backend = new AcpSdkBackend({ command: 'opencode' });
+        const backendInternal = backend as unknown as {
+            transport: {
+                sendRequest: (method: string, params: unknown, options?: unknown) => Promise<unknown>;
+                close: () => Promise<void>;
+            } | null;
+            handleSessionUpdate: (params: unknown) => void;
+        };
+        let promptRequestCount = 0;
+        backendInternal.transport = {
+            sendRequest: async (method) => {
+                if (method === 'session/prompt') {
+                    promptRequestCount += 1;
+                    if (promptRequestCount === 2) {
+                        backendInternal.handleSessionUpdate({
+                            sessionId: 'session-1',
+                            update: {
+                                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+                                content: { type: 'text', text: 'new prompt thought' }
+                            }
+                        });
+                        backendInternal.handleSessionUpdate({
+                            sessionId: 'session-1',
+                            update: {
+                                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                                content: { type: 'text', text: 'new prompt answer' }
+                            }
+                        });
+                    }
+                    return { stopReason: 'end_turn' };
+                }
+                return null;
+            },
+            close: async () => {}
+        };
+
+        const previousTurn: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'before compact' }], (message) => previousTurn.push(message));
+
+        await backend.suppressUpdatesDuring(async () => {
+            backendInternal.handleSessionUpdate({
+                sessionId: 'session-1',
+                update: {
+                    sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+                    content: { type: 'text', text: 'compact-only thought' }
+                }
+            });
+            backendInternal.handleSessionUpdate({
+                sessionId: 'session-1',
+                update: {
+                    sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                    content: { type: 'text', text: 'compact-only summary' }
+                }
+            });
+        });
+
+        const nextTurn: AgentMessage[] = [];
+        await backend.prompt('session-1', [{ type: 'text', text: 'after compact' }], (message) => nextTurn.push(message));
+
+        expect(previousTurn).toEqual([
+            { type: 'turn_complete', stopReason: 'end_turn' }
+        ]);
+        expect(nextTurn).toEqual([
+            { type: 'reasoning', text: 'new prompt thought' },
+            { type: 'text', text: 'new prompt answer' },
+            { type: 'turn_complete', stopReason: 'end_turn' }
+        ]);
     });
 });

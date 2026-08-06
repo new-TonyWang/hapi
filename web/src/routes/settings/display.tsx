@@ -6,8 +6,10 @@ import { getFontScaleOptions, useFontScale } from '@/hooks/useFontScale'
 import { getTerminalFontSizeOptions, useTerminalFontSize } from '@/hooks/useTerminalFontSize'
 import { getSessionListStatusModeOptions, useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
+import { usePinInProgressSessions } from '@/hooks/usePinInProgressSessions'
 import { MAX_SESSION_PREVIEW_LIMIT, MIN_SESSION_PREVIEW_LIMIT, normalizeSessionPreviewLimit, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { useThemeColors, type ThemeColorKeyId } from '@/hooks/useThemeColors'
+import { useSessionHeaderMetadata, type SessionHeaderMetadataKey } from '@/hooks/useSessionHeaderMetadata'
 import { SettingsChoiceGroup, SettingsFieldLabel, SettingsPageContent, SettingsRow, SettingsSection, SettingsSwitch } from '@/components/settings/SettingsPrimitives'
 
 function MinusIcon() {
@@ -135,6 +137,20 @@ export default function SettingsDisplayPage() {
     const { terminalFontSize, setTerminalFontSize } = useTerminalFontSize()
     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
     const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
+    const { pinInProgressSessions, setPinInProgressSessions } = usePinInProgressSessions()
+    const { preferences: sessionHeaderMetadata, setPreference: setSessionHeaderMetadata } = useSessionHeaderMetadata()
+    const sessionHeaderOptions: ReadonlyArray<{ key: SessionHeaderMetadataKey; labelKey: string }> = [
+        { key: 'showLabels', labelKey: 'settings.display.sessionHeader.showLabels' },
+        { key: 'agent', labelKey: 'settings.display.sessionHeader.agent' },
+        { key: 'machine', labelKey: 'settings.display.sessionHeader.machine' },
+        { key: 'lastActive', labelKey: 'settings.display.sessionHeader.lastActive' },
+        { key: 'model', labelKey: 'settings.display.sessionHeader.model' },
+        { key: 'reasoning', labelKey: 'settings.display.sessionHeader.reasoning' },
+        { key: 'fastMode', labelKey: 'settings.display.sessionHeader.fastMode' },
+        { key: 'createdAt', labelKey: 'settings.display.sessionHeader.createdAt' },
+        { key: 'updatedAt', labelKey: 'settings.display.sessionHeader.updatedAt' },
+        { key: 'worktree', labelKey: 'settings.display.sessionHeader.worktree' },
+    ]
 
     return (
         <SettingsPageContent description={t('settings.display.description')}>
@@ -158,13 +174,25 @@ export default function SettingsDisplayPage() {
             <SettingsSection title={t('settings.display.sessions')}>
                 <SessionPreviewLimitControl />
                 <SettingsSwitch label={t('settings.display.activeSessionsOnly')} description={t('settings.display.activeSessionsOnly.desc')} checked={showActiveSessionsOnly} onChange={setShowActiveSessionsOnly} />
+                <SettingsSwitch label={t('settings.display.pinInProgressSessions')} description={t('settings.display.pinInProgressSessions.desc')} checked={pinInProgressSessions} onChange={setPinInProgressSessions} />
                 <SettingsChoiceGroup
                     label={t('settings.display.sessionListStatus')}
+                    description={t('settings.display.sessionListStatus.detailedDescription')}
                     value={sessionListStatusMode}
                     options={getSessionListStatusModeOptions().map((option) => ({ value: option.value, label: t(option.labelKey) }))}
                     onChange={setSessionListStatusMode}
                 />
-                {sessionListStatusMode === 'detailed' ? <div className="px-3 pb-3 text-xs text-[var(--app-hint)]">{t('settings.display.sessionListStatus.detailedDescription')}</div> : null}
+            </SettingsSection>
+
+            <SettingsSection title={t('settings.display.sessionHeader')} description={t('settings.display.sessionHeader.description')}>
+                {sessionHeaderOptions.map((option) => (
+                    <SettingsSwitch
+                        key={option.key}
+                        label={t(option.labelKey)}
+                        checked={sessionHeaderMetadata[option.key]}
+                        onChange={(checked) => setSessionHeaderMetadata(option.key, checked)}
+                    />
+                ))}
             </SettingsSection>
         </SettingsPageContent>
     )

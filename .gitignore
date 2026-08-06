@@ -50,3 +50,5 @@ e2e-output/
 .xyz-harness
 .agents/
 .pi/
+
+.bun-install/

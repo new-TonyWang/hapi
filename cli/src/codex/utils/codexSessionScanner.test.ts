@@ -59,6 +59,27 @@ describe('codexSessionScanner', () => {
         expect(events[0]?.type).toBe('event_msg');
     });
 
+    it('flushes an appended tail without waiting for the watcher', async () => {
+        await writeFile(
+            transcriptPath,
+            JSON.stringify({ type: 'session_meta', payload: { id: 'session-flush' } }) + '\n'
+        );
+
+        scanner = await createCodexSessionScanner({
+            transcriptPath,
+            onEvent: (event) => events.push(event)
+        });
+
+        await appendFile(
+            transcriptPath,
+            JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'final tail' } }) + '\n'
+        );
+        await scanner.flush();
+
+        expect(events).toHaveLength(1);
+        expect(events[0]?.payload).toEqual({ type: 'agent_message', message: 'final tail' });
+    });
+
     it('reads exactly the requested transcript byte range', async () => {
         const initial = 'existing transcript\n';
         const appended = 'new event\n';
@@ -83,16 +104,28 @@ describe('codexSessionScanner', () => {
             ].join('\n') + '\n'
         );
 
+        const replayFlags: boolean[] = [];
         scanner = await createCodexSessionScanner({
             transcriptPath,
             replayExistingHistory: true,
-            onEvent: (event) => events.push(event)
+            onEvent: (event, context) => {
+                events.push(event);
+                replayFlags.push(context.replayedHistory);
+            }
         });
 
         await wait(300);
         expect(events).toHaveLength(2);
         expect(events[0]?.type).toBe('session_meta');
         expect(events[1]?.payload).toEqual({ type: 'agent_message', message: 'old' });
+        expect(replayFlags).toEqual([true, true]);
+
+        await appendFile(
+            transcriptPath,
+            JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'new' } }) + '\n'
+        );
+        await scanner.flush();
+        expect(replayFlags).toEqual([true, true, false]);
     });
 
     it('reports session id from the transcript metadata', async () => {

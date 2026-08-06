@@ -1,6 +1,8 @@
 import { useTranslation } from '@/lib/use-translation'
 import { getComposerEnterBehaviorOptions, useComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { getTerminalToolDisplayModeOptions, useTerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
+import { useCodexExplorationCollapse } from '@/hooks/useCodexExplorationCollapse'
+import { useReasoningCollapse } from '@/hooks/useReasoningCollapse'
 import {
     getChatSurfaceColorPickerValue,
     getChatSurfaceColorPresetOptions,
@@ -10,7 +12,7 @@ import {
     type ChatSurfaceColorPreference,
     type ChatSurfaceColorPreset,
 } from '@/hooks/useChatSurfaceColors'
-import { SettingsChoiceGroup, SettingsFieldLabel, SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
+import { SettingsChoiceGroup, SettingsFieldLabel, SettingsPageContent, SettingsSection, SettingsSwitch } from '@/components/settings/SettingsPrimitives'
 import { ComposerToolbarLayoutControl } from '@/components/settings/ComposerToolbarLayoutControl'
 
 function ChatSurfaceColorControl(props: {
@@ -48,6 +50,8 @@ export default function SettingsChatPage() {
     const { t } = useTranslation()
     const { composerEnterBehavior, setComposerEnterBehavior } = useComposerEnterBehavior()
     const { terminalToolDisplayMode, setTerminalToolDisplayMode } = useTerminalToolDisplayMode()
+    const { codexExplorationCollapsed, setCodexExplorationCollapsed } = useCodexExplorationCollapse()
+    const { reasoningCollapsed, setReasoningCollapsed } = useReasoningCollapse()
     const { toolGroupBackground, userMessageBackground, setToolGroupBackground, setUserMessageBackground } = useChatSurfaceColors()
     return (
         <SettingsPageContent description={t('settings.chat.description')}>
@@ -66,6 +70,18 @@ export default function SettingsChatPage() {
                     value={terminalToolDisplayMode}
                     options={getTerminalToolDisplayModeOptions().map((option) => ({ value: option.value, label: t(option.labelKey) }))}
                     onChange={setTerminalToolDisplayMode}
+                />
+                <SettingsSwitch
+                    label={t('settings.chat.codexExplorationCollapsed')}
+                    description={t('settings.chat.codexExplorationCollapsed.desc')}
+                    checked={codexExplorationCollapsed}
+                    onChange={setCodexExplorationCollapsed}
+                />
+                <SettingsSwitch
+                    label={t('settings.chat.reasoningCollapsed')}
+                    description={t('settings.chat.reasoningCollapsed.desc')}
+                    checked={reasoningCollapsed}
+                    onChange={setReasoningCollapsed}
                 />
             </SettingsSection>
             <SettingsSection title={t('settings.chat.colors')}>

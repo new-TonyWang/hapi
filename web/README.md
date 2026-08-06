@@ -37,6 +37,7 @@ See `src/router.tsx` for route definitions.
 - `/settings/voice` - Everyday voice assistant preferences.
 - `/settings/voice/voices` - Full-page voice picker.
 - `/settings/voice/advanced` - Voice persona, tuning, and diagnostics.
+- `/settings/usage` - Cache-aware token usage dashboard for the hub owner.
 - `/settings/about` - Application links and version information.
 
 ## Features
@@ -85,6 +86,7 @@ See `src/router.tsx` for route definitions.
 
 - ElevenLabs integration (@elevenlabs/react)
 - Real-time voice control
+- Standard and realtime composer dictation with provider capability selection
 
 ### New session (`src/components/NewSession/`)
 

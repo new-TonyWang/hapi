@@ -4,6 +4,7 @@ import type { EnhancedMode } from './loop';
 
 const harness = vi.hoisted(() => ({
     initializeError: null as Error | null,
+    initializeAttempts: 0,
     loadSessionError: null as Error | null,
     supportsLoadSession: true,
     loadSessionCalled: false,
@@ -15,7 +16,8 @@ const harness = vi.hoisted(() => ({
     deferSetConfigOption: null as Promise<void> | null,
     releaseSetConfigOption: null as (() => void) | null,
     deferLoadSession: null as Promise<void> | null,
-    releaseLoadSession: null as (() => void) | null
+    releaseLoadSession: null as (() => void) | null,
+    stderrErrorHandler: null as ((error: { type: string; message: string; raw?: string }) => void) | null
 }));
 
 const legacyLauncher = vi.hoisted(() => vi.fn());
@@ -35,7 +37,15 @@ vi.mock('./utils/cursorAcpBackend', () => ({
         harness.backendArgs = { command: 'agent', args };
         return {
             initialize: vi.fn(async () => {
-                if (harness.initializeError) throw harness.initializeError;
+                harness.initializeAttempts += 1;
+                if (harness.initializeError && harness.initializeAttempts === 1) {
+                    harness.stderrErrorHandler?.({
+                        type: 'model_not_found',
+                        message: harness.initializeError.message,
+                        raw: harness.initializeError.message
+                    });
+                    throw harness.initializeError;
+                }
             }),
             authenticateIfAvailable: vi.fn(async () => {}),
             supportsLoadSession: vi.fn(() => harness.supportsLoadSession),
@@ -96,7 +106,9 @@ vi.mock('./utils/cursorAcpBackend', () => ({
             }),
             cancelPrompt: vi.fn(async () => {}),
             respondToPermission: vi.fn(async () => {}),
-            onStderrError: vi.fn(),
+            onStderrError: vi.fn((handler) => {
+                harness.stderrErrorHandler = handler ?? null;
+            }),
             setUsageUpdateListener: vi.fn(),
             setSessionInfoUpdateListener: vi.fn(),
             refreshSessionInfo: vi.fn(async () => {}),
@@ -135,7 +147,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: vi.fn(), warn: vi.fn(), info: vi.fn() }
 }));
 
-import { cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
+import { classifyCursorAcpLoadError, cursorAcpRemoteLauncher } from './cursorAcpRemoteLauncher';
 import { createCursorAcpBackend } from './utils/cursorAcpBackend';
 import { CursorSession } from './session';
 import { ApiSessionClient } from '@/api/apiSession';
@@ -181,6 +193,7 @@ function makeClient() {
 describe('cursorAcpRemoteLauncher', () => {
     beforeEach(() => {
         harness.initializeError = null;
+        harness.initializeAttempts = 0;
         harness.loadSessionError = null;
         harness.supportsLoadSession = true;
         harness.loadSessionCalled = false;
@@ -192,6 +205,7 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.releaseSetConfigOption = null;
         harness.deferLoadSession = null;
         harness.releaseLoadSession = null;
+        harness.stderrErrorHandler = null;
         legacyLauncher.mockClear();
         process.stdin.isTTY = false;
         process.stdout.isTTY = false;
@@ -218,13 +232,28 @@ describe('cursorAcpRemoteLauncher', () => {
         await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow(
             /Cursor ACP mode is required for new Cursor remote sessions/
         );
-
-        expect(client.sendAgentMessage).toHaveBeenCalledWith({
-            type: 'error',
-            message: expect.stringContaining('agent acp not found')
-        });
         expect(legacyLauncher).not.toHaveBeenCalled();
-        expect(harness.newSessionCalled).toBe(false);
+        expect(client.sendAgentMessage).toHaveBeenCalled();
+    });
+
+    it('surfaces Cursor model rejection during initialize instead of the generic ACP-required message', async () => {
+        harness.initializeError = new Error(
+            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: grok-4.5[fast=true]. Available models: auto'
+        );
+        const session = makeSession(null);
+
+        const error = await cursorAcpRemoteLauncher(session).then(
+            () => null,
+            (err: unknown) => err
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(
+            /^Failed to start Cursor ACP session: Cannot use this model: grok-4\.5\[fast=true\]/
+        );
+        expect((error as Error).message).toMatch(/Available models: auto/);
+        expect((error as Error).message).not.toMatch(/Cursor ACP mode is required/);
+        expect((error as Error).message).not.toMatch(/Legacy stream-json/);
+        expect(legacyLauncher).not.toHaveBeenCalled();
     });
 
     it('registers cursorSessionId before session/load completes', async () => {
@@ -252,11 +281,84 @@ describe('cursorAcpRemoteLauncher', () => {
         harness.loadSessionError = new Error('session not found');
         const session = makeSession('old-stream-json-id');
 
-        await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow(
-            /Legacy stream-json sessions cannot be loaded via ACP/
+        const error = await cursorAcpRemoteLauncher(session).then(
+            () => null,
+            (err: unknown) => err
         );
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/Failed to resume Cursor ACP session: session not found/);
+        expect((error as Error).message).not.toMatch(/Legacy stream-json/);
 
         expect(harness.loadSessionCalled).toBe(true);
+        expect(harness.newSessionCalled).toBe(false);
+        expect(legacyLauncher).not.toHaveBeenCalled();
+    });
+
+    it('remaps stale spawn model and retries initialize once on model rejection', async () => {
+        harness.initializeError = new Error(
+            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: grok-4.5[fast=false]. Available models: auto, cursor-grok-4.5-medium, cursor-grok-4.5-medium-fast'
+        );
+
+        const queue = new MessageQueue2<EnhancedMode>((mode) => mode.permissionMode);
+        const keepAlive = vi.fn();
+        const client = {
+            rpcHandlerManager: { registerHandler: vi.fn() },
+            updateMetadata: vi.fn(),
+            flushMetadata: vi.fn(async () => true),
+            sendSessionEvent: vi.fn(),
+            sendAgentMessage: vi.fn(),
+            keepAlive,
+            emitSessionReady: vi.fn()
+        } as unknown as ApiSessionClient;
+
+        const session = new CursorSession({
+            api: {} as never,
+            client,
+            path: '/tmp/project',
+            logPath: '/tmp/log',
+            sessionId: null,
+            messageQueue: queue,
+            onModeChange: vi.fn(),
+            mode: 'remote',
+            startedBy: 'runner',
+            startingMode: 'remote',
+            permissionMode: 'default',
+            model: 'grok-4.5[fast=false]'
+        });
+        session.onSessionFoundWithProtocol = vi.fn();
+        queue.push('hold-open', { permissionMode: 'default' });
+
+        const runPromise = cursorAcpRemoteLauncher(session);
+        await vi.waitFor(() => expect(harness.initializeAttempts).toBe(2));
+        await vi.waitFor(() => expect(harness.newSessionCalled).toBe(true));
+
+        expect(harness.backendArgs?.args).toContain('cursor-grok-4.5-medium');
+        expect(keepAlive).toHaveBeenCalled();
+        expect(
+            (client.sendAgentMessage as ReturnType<typeof vi.fn>).mock.calls.some((call) =>
+                JSON.stringify(call[0]).includes('Cannot use this model')
+            )
+        ).toBe(false);
+
+        queue.close();
+        await runPromise;
+    });
+
+    it('surfaces Cursor model rejection from session/load instead of claiming legacy protocol', async () => {
+        harness.loadSessionError = new Error(
+            'ACP process exited (code=1, signal=null). stderr: Cannot use this model: grok-4.5[fast=true]. Available models: auto, cursor-grok-4.5-high-fast'
+        );
+        const session = makeSession('acp-thread-1');
+
+        const error = await cursorAcpRemoteLauncher(session).then(
+            () => null,
+            (err: unknown) => err
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toMatch(/Cannot use this model: grok-4\.5\[fast=true\]/);
+        expect((error as Error).message).toMatch(/Available models: auto, cursor-grok-4\.5-high-fast/);
+        expect((error as Error).message).not.toMatch(/Legacy stream-json/);
+
         expect(harness.newSessionCalled).toBe(false);
         expect(legacyLauncher).not.toHaveBeenCalled();
     });
@@ -297,10 +399,61 @@ describe('cursorAcpRemoteLauncher', () => {
         const session = makeSession('old-stream-json-id');
 
         await expect(cursorAcpRemoteLauncher(session)).rejects.toThrow(
-            /Legacy stream-json sessions cannot be loaded via ACP/
+            /Failed to resume Cursor ACP session: session not found/
         );
 
         expect(session.client.emitSessionReady).not.toHaveBeenCalled();
+    });
+
+    describe('classifyCursorAcpLoadError', () => {
+        it('prefers Cannot use this model text from the underlying error', () => {
+            const message = classifyCursorAcpLoadError(
+                new Error('ACP process exited (code=1, signal=null). stderr: Cannot use this model: grok-4.5[fast=true]. Available models: auto, composer-2.5')
+            );
+            expect(message).toContain('Cannot use this model: grok-4.5[fast=true]');
+            expect(message).toContain('Available models: auto, composer-2.5');
+            expect(message).not.toMatch(/Legacy stream-json/);
+        });
+
+        it('uses recentStderr hint when exit error omits the model line', () => {
+            const message = classifyCursorAcpLoadError(
+                new Error('ACP process exited (code=1, signal=null)'),
+                { recentStderr: 'Cannot use this model: stale-id. Available models: auto' }
+            );
+            expect(message).toContain('Cannot use this model: stale-id');
+            expect(message).toContain('Available models: auto');
+            expect(message).not.toMatch(/Legacy stream-json/);
+        });
+
+        it('prefers accumulated close stderr over a partial recentStderr hint', () => {
+            const message = classifyCursorAcpLoadError(
+                new Error(
+                    'ACP process exited (code=1, signal=null). stderr: Cannot use this model: full-id. Available models: auto, composer-2.5'
+                ),
+                { recentStderr: 'Cannot use this mo' }
+            );
+            expect(message).toContain('Cannot use this model: full-id');
+            expect(message).toContain('Available models: auto, composer-2.5');
+            expect(message).not.toContain('Cannot use this mo:');
+        });
+
+        it('propagates generic load failures without inventing a legacy diagnosis', () => {
+            const message = classifyCursorAcpLoadError(new Error('Session "abc" not found'));
+            expect(message).toBe('Failed to resume Cursor ACP session: Session "abc" not found');
+            expect(message).not.toMatch(/Legacy stream-json/);
+        });
+
+        it('uses start action prefix for spawn-time model rejection', () => {
+            const message = classifyCursorAcpLoadError(
+                new Error('ACP process exited (code=1, signal=null)'),
+                {
+                    recentStderr: 'Cannot use this model: stale-id. Available models: auto',
+                    action: 'start'
+                }
+            );
+            expect(message).toMatch(/^Failed to start Cursor ACP session: Cannot use this model: stale-id/);
+            expect(message).not.toMatch(/Failed to resume/);
+        });
     });
 
     // tiann/hapi#913: fresh ACP sessions previously persisted `cursorSessionId`

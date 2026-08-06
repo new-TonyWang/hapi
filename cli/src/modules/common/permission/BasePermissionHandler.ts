@@ -30,14 +30,27 @@ const AUTO_APPROVE_EXACT_TOOL_NAMES = new Set([
     'skill_lookup',
     'hapi_skill_lookup',
     'happy__skill_lookup',
-    'mcp__hapi__skill_lookup'
+    'mcp__hapi__skill_lookup',
+    // Discovery shortlist only (id/active/flavor/name) - same as ping-peer --list.
+    'list_peers',
+    'hapi_list_peers',
+    'happy__list_peers',
+    'mcp__hapi__list_peers',
+    // ACP permission requests often surface MCP tool title, not the snake_case name.
+    'list peer sessions'
 ]);
-// ping_peer intentionally omitted from always-approve: it can resume another
-// session and inject a prompt into a peer, so permission modes must still gate
-// it (Codex PR #1195). Treat it as write-like in read-only so ACP titles such as
-// "Ping Peer Session" also require approval.
+// ping_peer / inspect_peer intentionally omitted from always-approve: they can
+// resume+inject into another session or read peer histories, so permission
+// modes must still gate them. Treat both as write-like in read-only so ACP
+// titles such as "Ping Peer Session" / "Inspect Peer Session" also require
+// approval. list_peers is discovery-only and is auto-approved above.
 const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'save_memory'];
-const SENSITIVE_TOOL_NAME_HINTS = ['ping_peer', 'ping peer'];
+const SENSITIVE_TOOL_NAME_HINTS = [
+    'ping_peer',
+    'ping peer',
+    'inspect_peer',
+    'inspect peer',
+];
 const AUTO_APPROVE_WRITE_TOOL_HINTS = [
     'write',
     'edit',
@@ -62,7 +75,7 @@ export function resolveToolAutoApprovalDecision(
 
     const lowerTool = toolName.toLowerCase();
     const lowerId = toolCallId.toLowerCase();
-    const decisionForMode: AutoApprovalDecision = mode === 'yolo' ? 'approved_for_session' : 'approved';
+    const decisionForMode: AutoApprovalDecision = (mode === 'yolo' || mode === 'always-proceed') ? 'approved_for_session' : 'approved';
 
     if (
         AUTO_APPROVE_EXACT_TOOL_NAMES.has(lowerTool)
@@ -75,7 +88,7 @@ export function resolveToolAutoApprovalDecision(
         return decisionForMode;
     }
 
-    if (mode === 'yolo') {
+    if (mode === 'yolo' || mode === 'always-proceed') {
         return 'approved_for_session';
     }
 
@@ -116,6 +129,14 @@ export type CancelPendingRequestOptions = {
     completedReason: string;
     rejectMessage: string;
     decision?: PermissionCompletion['decision'];
+    /**
+     * When set, only pending requests whose toolName satisfies the predicate
+     * are canceled; every other pending request (and its agentState entry) is
+     * left untouched. Omitting it cancels everything — the original,
+     * unscoped behavior every existing caller (session-teardown cancelAll)
+     * relies on.
+     */
+    filter?: (toolName: string) => boolean;
 };
 
 export abstract class BasePermissionHandler<TResponse extends { id: string }, TResult> {
@@ -199,16 +220,24 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
     }
 
     protected cancelPendingRequests(options: CancelPendingRequestOptions): void {
-        for (const [, pending] of this.pendingRequests.entries()) {
+        const { filter } = options;
+
+        for (const [id, pending] of this.pendingRequests.entries()) {
+            if (filter && !filter(pending.toolName)) continue;
             pending.reject(new Error(options.rejectMessage));
+            this.pendingRequests.delete(id);
         }
-        this.pendingRequests.clear();
 
         this.client.updateAgentState((currentState) => {
             const pendingRequests = currentState.requests || {};
             const completedRequests = { ...currentState.completedRequests };
+            const nextRequests: typeof pendingRequests = {};
 
             for (const [id, request] of Object.entries(pendingRequests)) {
+                if (filter && !filter(request.tool)) {
+                    nextRequests[id] = request;
+                    continue;
+                }
                 completedRequests[id] = {
                     ...request,
                     completedAt: Date.now(),
@@ -220,7 +249,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
 
             return {
                 ...currentState,
-                requests: {},
+                requests: nextRequests,
                 completedRequests
             };
         });

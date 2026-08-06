@@ -4,12 +4,18 @@ import type { AppendMessage, AttachmentAdapter, ThreadMessageLike } from '@assis
 import { useExternalMessageConverter, useExternalStoreRuntime } from '@assistant-ui/react'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+import {
+    consumeComposerSendIntent,
+    type ComposerSendIntent,
+} from '@/lib/messageDelivery'
 import { safeStringify } from '@hapi/protocol'
 import { renderEventLabel } from '@/chat/presentation'
 import type { ChatBlock, CliOutputBlock, CodexReview, UsageData } from '@/chat/types'
 import type { AgentEvent, ToolCallBlock } from '@/chat/types'
 import type { ToolGroupBlock, VisibleChatBlock } from '@/chat/toolGroups'
+import { visibleBlockRole } from '@/chat/toolGroups'
 import type { AttachmentMetadata, MessageStatus as HappyMessageStatus, Session } from '@/types/api'
+import { buildShareHiddenByMessageId } from '@/lib/shareTurnAvailability'
 
 /**
  * Aggregated metadata for a multi-turn response group, surfaced on the
@@ -46,6 +52,13 @@ export type HappyChatMessageMetadata = {
     turnCount?: number
 }
 
+export type HappyRuntimeExtras = Readonly<{
+    messagesVersion: number
+    historyVersion: number
+    runningSince: number
+    shareHiddenByMessageId: ReadonlySet<string>
+}>
+
 function formatCodexReviewText(review: CodexReview): string {
     const lines = ['Codex review']
     if (review.overallCorrectness) {
@@ -68,20 +81,6 @@ function formatCodexReviewText(review: CodexReview): string {
     return lines.join('\n')
 }
 
-type VisibleChatBlockRole = 'user' | 'assistant' | 'system'
-
-/**
- * Mirror the role assignment used by `toThreadMessageLike` so response
- * group boundaries (the `@assistant-ui/react` converter joins adjacent
- * assistant-role messages only) stay consistent with what the library
- * actually flushes as one card.
- */
-function visibleBlockRole(block: VisibleChatBlock): VisibleChatBlockRole {
-    if (block.kind === 'user-text') return 'user'
-    if (block.kind === 'agent-event') return 'system'
-    if (block.kind === 'cli-output') return block.source === 'user' ? 'user' : 'assistant'
-    return 'assistant'
-}
 
 export function getBlockPresentationTimestamp(block: VisibleChatBlock): number {
     if (visibleBlockRole(block) === 'user') {
@@ -615,13 +614,26 @@ function extractMessageContent(message: AppendMessage): { text: string; attachme
 export function useHappyRuntime(props: {
     session: Session
     blocks: readonly VisibleChatBlock[]
+    messagesVersion: number
+    historyVersion: number
     isSending: boolean
     isRunning?: boolean
-    onSendMessage: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => void
+    onSendMessage: (
+        text: string,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        intent?: ComposerSendIntent,
+    ) => void
     onAbort: () => Promise<void>
     attachmentAdapter?: AttachmentAdapter
     allowSendWhenInactive?: boolean
     pendingScheduleRef?: React.RefObject<PendingSchedule | null>
+    /**
+     * Shared one-shot ref with HappyComposer. The composer marks the next
+     * `api.composer().send()`; this adapter consumes and resets the mark as
+     * soon as assistant-ui emits the corresponding AppendMessage.
+     */
+    pendingSendIntentRef?: React.MutableRefObject<ComposerSendIntent>
 }) {
     const isRunning = props.isRunning ?? props.session.thinking
 
@@ -687,6 +699,10 @@ export function useHappyRuntime(props: {
     })
 
     const onNew = useCallback(async (message: AppendMessage) => {
+        const intent = consumeComposerSendIntent(props.pendingSendIntentRef)
+        // Reset before any early return so an empty submission, extraction
+        // failure, or downstream exception cannot leak an explicit queue
+        // gesture into the next ordinary send.
         const { text, attachments } = extractMessageContent(message)
         if (!text && attachments.length === 0) return
         // Resolve pendingSchedule at send time (Date.now()) so preset-type schedules
@@ -694,12 +710,24 @@ export function useHappyRuntime(props: {
         // moment the user clicked the preset button.
         const sendNow = Date.now()
         const scheduledAt = resolvePendingSchedule(props.pendingScheduleRef?.current ?? null, sendNow)
-        props.onSendMessage(text, attachments.length > 0 ? attachments : undefined, scheduledAt)
-    }, [props.onSendMessage, props.pendingScheduleRef])
+        props.onSendMessage(text, attachments.length > 0 ? attachments : undefined, scheduledAt, intent)
+    }, [props.onSendMessage, props.pendingScheduleRef, props.pendingSendIntentRef])
 
     const onCancel = useCallback(async () => {
         await props.onAbort()
     }, [props.onAbort])
+
+    const runningSince = props.session.activeTurnStartedAt ?? 0
+    const shareHiddenByMessageId = useMemo(
+        () => buildShareHiddenByMessageId(convertedMessages, isRunning, runningSince),
+        [convertedMessages, isRunning, runningSince]
+    )
+    const extras = useMemo<HappyRuntimeExtras>(() => ({
+        messagesVersion: props.messagesVersion,
+        historyVersion: props.historyVersion,
+        runningSince,
+        shareHiddenByMessageId
+    }), [props.messagesVersion, props.historyVersion, runningSince, shareHiddenByMessageId])
 
     // Memoize the adapter to avoid recreating on every render
     // useExternalStoreRuntime may use adapter identity for subscriptions
@@ -707,6 +735,7 @@ export function useHappyRuntime(props: {
         isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
         isRunning,
         messages: convertedMessages,
+        extras,
         onNew,
         onCancel,
         adapters: props.attachmentAdapter ? { attachments: props.attachmentAdapter } : undefined,
@@ -717,6 +746,7 @@ export function useHappyRuntime(props: {
         props.allowSendWhenInactive,
         isRunning,
         convertedMessages,
+        extras,
         onNew,
         onCancel,
         props.attachmentAdapter

@@ -9,10 +9,13 @@ import type {
     CodexDesktopStatusResponse,
     CodexArchiveSessionResponse,
     CodexCollaborationMode,
+    CopilotAgentMode,
     FileSearchResponse,
     MachinesResponse,
     MessagesResponse,
     PermissionMode,
+    PiImportSessionsResponse,
+    PiLocalSessionsResponse,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
     PushVapidPublicKeyResponse,
@@ -25,6 +28,7 @@ import type {
     SessionsResponse
 } from '@/types/api'
 import type {
+    AgyModelsResponse,
     CodexModelsResponse,
     CursorMigrateOutcome,
     CursorMigrateToAcpRequest,
@@ -34,6 +38,7 @@ import type {
     FileReadResponse,
     GitCommandResponse,
     GrokModelsResponse,
+    CopilotModelsResponse,
     GrokReasoningEffortResponse,
     ListDirectoryResponse,
     MachineListDirectoryResponse,
@@ -42,10 +47,13 @@ import type {
     OpencodeReasoningEffortResponse,
     QueuedStateResponse,
     ReopenSessionResponse,
+    SqliteStorageUsageResponse,
+    UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
-import type { AgentFlavor } from '@hapi/protocol'
+import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse } from '@hapi/protocol/schemas'
+import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
 
 type ApiClientOptions = {
     baseUrl?: string
@@ -121,7 +129,7 @@ export class ApiClient {
         if (authToken) {
             headers.set('authorization', `Bearer ${authToken}`)
         }
-        if (init?.body !== undefined && !headers.has('content-type')) {
+        if (init?.body !== undefined && !(init.body instanceof FormData) && !headers.has('content-type')) {
             headers.set('content-type', 'application/json')
         }
 
@@ -220,6 +228,21 @@ export class ApiClient {
         return await this.request<CodexLocalSessionsResponse>(`/api/codex/sessions${query}`)
     }
 
+    async getPiSessions(cwd?: string | null, machineId?: string | null): Promise<PiLocalSessionsResponse> {
+        const params = new URLSearchParams()
+        if (cwd?.trim()) params.set('cwd', cwd.trim())
+        if (machineId?.trim()) params.set('machineId', machineId.trim())
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
+    }
+
+    async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
+        return await this.request<PiImportSessionsResponse>('/api/pi/import-sessions', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })
+    }
+
     async archiveCodexSession(sessionId: string, machineId?: string | null): Promise<CodexArchiveSessionResponse> {
         return await this.request<CodexArchiveSessionResponse>('/api/codex/archive-session', {
             method: 'POST',
@@ -283,6 +306,11 @@ export class ApiClient {
         options: {
             beforeSeq?: number | null
             beforeAt?: number | null
+            afterSeq?: number | null
+            afterAt?: number | null
+            untilSeq?: number | null
+            untilAt?: number | null
+            epoch?: number | null
             limit?: number
         }
     ): Promise<MessagesResponse> {
@@ -292,6 +320,21 @@ export class ApiClient {
         }
         if (options.beforeSeq !== undefined && options.beforeSeq !== null) {
             params.set('beforeSeq', `${options.beforeSeq}`)
+        }
+        if (options.afterAt !== undefined && options.afterAt !== null) {
+            params.set('afterAt', `${options.afterAt}`)
+        }
+        if (options.afterSeq !== undefined && options.afterSeq !== null) {
+            params.set('afterSeq', `${options.afterSeq}`)
+        }
+        if (options.untilAt !== undefined && options.untilAt !== null) {
+            params.set('untilAt', `${options.untilAt}`)
+        }
+        if (options.untilSeq !== undefined && options.untilSeq !== null) {
+            params.set('untilSeq', `${options.untilSeq}`)
+        }
+        if (options.epoch !== undefined && options.epoch !== null) {
+            params.set('epoch', `${options.epoch}`)
         }
         if (options.limit !== undefined && options.limit !== null) {
             params.set('limit', `${options.limit}`)
@@ -409,14 +452,22 @@ export class ApiClient {
         )
     }
 
-    async sendMessage(sessionId: string, text: string, localId?: string | null, attachments?: AttachmentMetadata[], scheduledAt?: number | null): Promise<void> {
+    async sendMessage(
+        sessionId: string,
+        text: string,
+        localId?: string | null,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        deliveryMode?: MessageDeliveryMode,
+    ): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
             method: 'POST',
             body: JSON.stringify({
                 text,
                 localId: localId ?? undefined,
                 attachments: attachments ?? undefined,
-                scheduledAt: scheduledAt ?? undefined
+                scheduledAt: scheduledAt ?? undefined,
+                deliveryMode: deliveryMode ?? undefined,
             })
         })
     }
@@ -444,6 +495,26 @@ export class ApiClient {
             method: 'POST',
             body: JSON.stringify({})
         })
+    }
+
+    async forkConversation(sessionId: string, messageLocalId?: string): Promise<{ sessionId: string }> {
+        return await this.request<{ sessionId: string }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+            {
+                method: 'POST',
+                body: JSON.stringify(messageLocalId ? { messageLocalId } : {})
+            }
+        )
+    }
+
+    async rewindConversation(sessionId: string, messageLocalId: string): Promise<{ success: true }> {
+        return await this.request<{ success: true }>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/rewind`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ messageLocalId })
+            }
+        )
     }
 
     async archiveSession(sessionId: string): Promise<void> {
@@ -593,15 +664,39 @@ export class ApiClient {
         return await this.request<MachinesResponse>('/api/machines')
     }
 
+    /** Pass an empty string to clear the custom name and fall back to the hostname. */
+    async renameMachine(machineId: string, displayName: string): Promise<void> {
+        await this.request(`/api/machines/${encodeURIComponent(machineId)}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ displayName })
+        })
+    }
+
+    async getSqliteStorageUsage(): Promise<SqliteStorageUsageResponse> {
+        return await this.request<SqliteStorageUsageResponse>('/api/storage/sqlite')
+    }
+
+    async getUsageSummary(
+        range: '7d' | '30d' | 'all' = '7d',
+        timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+    ): Promise<UsageSummaryResponse> {
+        const params = new URLSearchParams({
+            range,
+            timeZone
+        })
+        return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
+    }
+
     async listMachineDirectory(
         machineId: string,
-        path: string
+        path: string,
+        options?: { includeHidden?: boolean }
     ): Promise<MachineListDirectoryResponse> {
         return await this.request<MachineListDirectoryResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/list-directory`,
             {
                 method: 'POST',
-                body: JSON.stringify({ path })
+                body: JSON.stringify({ path, includeHidden: options?.includeHidden === true })
             }
         )
     }
@@ -631,7 +726,11 @@ export class ApiClient {
         sessionType?: 'simple' | 'worktree',
         worktreeName?: string,
         effort?: string,
-        permissionMode?: PermissionMode
+        permissionMode?: PermissionMode,
+        serviceTier?: 'fast' | 'standard',
+        collaborationMode?: CodexCollaborationMode,
+        copilotAgentMode?: CopilotAgentMode,
+        startingMode?: 'remote' | 'pty'
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
@@ -646,9 +745,19 @@ export class ApiClient {
                 sessionType,
                 worktreeName,
                 effort,
-                permissionMode
+                permissionMode,
+                serviceTier,
+                collaborationMode,
+                copilotAgentMode,
+                startingMode
             })
         })
+    }
+
+    async getMachineAgyModels(machineId: string): Promise<AgyModelsResponse> {
+        return await this.request<AgyModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/agy-models`
+        )
     }
 
     async getMachineCodexModels(machineId: string): Promise<CodexModelsResponse> {
@@ -701,10 +810,29 @@ export class ApiClient {
         )
     }
 
+    async getMachineCopilotModelsForCwd(machineId: string, cwd: string): Promise<CopilotModelsResponse> {
+        return await this.request<CopilotModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/copilot-models?cwd=${encodeURIComponent(cwd)}`
+        )
+    }
+
     async getSessionGrokModels(sessionId: string): Promise<GrokModelsResponse> {
         return await this.request<GrokModelsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/grok-models`
         )
+    }
+
+    async getSessionCopilotModels(sessionId: string): Promise<CopilotModelsResponse> {
+        return await this.request<CopilotModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/copilot-models`
+        )
+    }
+
+    async setCopilotAgentMode(sessionId: string, mode: CopilotAgentMode): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/copilot-agent-mode`, {
+            method: 'POST',
+            body: JSON.stringify({ mode })
+        })
     }
 
     async getSessionGrokReasoningEffortOptions(sessionId: string): Promise<GrokReasoningEffortResponse> {
@@ -736,6 +864,129 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
             method: 'DELETE'
         })
+    }
+
+    /*
+     * Scratchlist v2 (tiann/hapi#893).
+     *
+     * The hub is the durable store; localStorage is demoted to an
+     * offline cache. Mutations return the canonical entry so optimistic
+     * updates can reconcile with the hub-stamped `updatedAt`.
+     */
+
+    async getScratchlist(sessionId: string): Promise<{
+        entries: Array<{
+            entryId: string
+            text: string
+            createdAt: number
+            updatedAt: number
+            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }>
+    }> {
+        return await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`
+        )
+    }
+
+    async uploadScratchlistAttachment(
+        sessionId: string,
+        filename: string,
+        content: string,
+        mimeType: string
+    ): Promise<{
+        success: boolean
+        attachment?: import('@hapi/protocol').ScratchlistAttachmentMetadata
+        error?: string
+        code?: string
+    }> {
+        return await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/upload`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ filename, content, mimeType })
+            }
+        )
+    }
+
+    async fetchScratchlistAttachmentBlob(sessionId: string, attachmentId: string): Promise<Blob> {
+        const headers = new Headers()
+        const liveToken = this.getToken ? this.getToken() : null
+        const authToken = liveToken ?? this.token
+        if (authToken) {
+            headers.set('authorization', `Bearer ${authToken}`)
+        }
+        const response = await fetch(
+            this.buildUrl(
+                `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`
+            ),
+            { headers }
+        )
+        if (!response.ok) {
+            throw new ApiError(`Failed to fetch scratchlist attachment (${response.status})`, response.status)
+        }
+        return await response.blob()
+    }
+
+    async deleteScratchlistAttachment(sessionId: string, attachmentId: string): Promise<void> {
+        await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/attachments/${encodeURIComponent(attachmentId)}`,
+            { method: 'DELETE' }
+        )
+    }
+
+    async createScratchlistEntry(
+        sessionId: string,
+        body: {
+            text: string
+            entryId?: string
+            createdAt?: number
+            attachments?: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }
+    ): Promise<{
+        entry: {
+            entryId: string
+            text: string
+            createdAt: number
+            updatedAt: number
+            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }
+    }> {
+        return await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist`,
+            {
+                method: 'POST',
+                body: JSON.stringify(body)
+            }
+        )
+    }
+
+    async updateScratchlistEntry(
+        sessionId: string,
+        entryId: string,
+        text: string
+    ): Promise<{
+        entry: {
+            entryId: string
+            text: string
+            createdAt: number
+            updatedAt: number
+            attachments: import('@hapi/protocol').ScratchlistAttachmentMetadata[]
+        }
+    }> {
+        return await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,
+            {
+                method: 'PUT',
+                body: JSON.stringify({ text })
+            }
+        )
+    }
+
+    async deleteScratchlistEntry(sessionId: string, entryId: string): Promise<void> {
+        await this.request(
+            `/api/sessions/${encodeURIComponent(sessionId)}/scratchlist/${encodeURIComponent(entryId)}`,
+            { method: 'DELETE' }
+        )
     }
 
     async fetchVoiceToken(options?: { customAgentId?: string; customApiKey?: string; voiceId?: string }): Promise<{
@@ -773,8 +1024,38 @@ export class ApiClient {
         return this.getToken ? this.getToken() : this.token
     }
 
-    async fetchVoiceBackend(): Promise<{ backend: string; backends: string[] }> {
+    async fetchVoiceBackend(): Promise<{ backend: string | null; backends: string[] }> {
         return await this.request('/api/voice/backend')
+    }
+
+    async fetchTranscriptionProviders(): Promise<{ providers: TranscriptionProviderInfo[] }> {
+        return await this.request('/api/voice/transcription/providers')
+    }
+
+    async transcribeVoice(options: {
+        file: File
+        provider: TranscriptionProvider
+        mode: TranscriptionMode
+        language?: string
+    }): Promise<{ text: string; language?: string }> {
+        const form = new FormData()
+        form.set('file', options.file)
+        form.set('provider', options.provider)
+        form.set('mode', options.mode)
+        if (options.language) form.set('language', options.language)
+        return await this.request('/api/voice/transcription', { method: 'POST', body: form })
+    }
+
+    async fetchRealtimeTranscriptionToken(
+        provider: 'openai' | 'elevenlabs' | 'deepgram',
+        language?: string,
+        signal?: AbortSignal
+    ): Promise<{ token: string }> {
+        return await this.request('/api/voice/transcription/realtime-token', {
+            method: 'POST',
+            signal,
+            body: JSON.stringify({ provider, language })
+        })
     }
 
     async fetchQwenToken(): Promise<{

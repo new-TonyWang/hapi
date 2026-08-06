@@ -66,6 +66,21 @@ describe('listSkills', () => {
         expect(skills.map((skill) => skill.name)).toEqual(['amis'])
     })
 
+    it('lists symlinked skill directories and ignores invalid symlink targets', async () => {
+        const skillsRoot = join(homeDir, '.agents', 'skills')
+        const source = join(sandboxDir, 'shared-skills', 'linked')
+        await writeSkill(source, 'linked', 'Linked skill')
+        await mkdir(skillsRoot, { recursive: true })
+        await symlink(source, join(skillsRoot, 'linked'), 'dir')
+        await symlink(join(sandboxDir, 'missing'), join(skillsRoot, 'broken'), 'dir')
+        await writeFile(join(sandboxDir, 'not-a-directory'), 'not a skill')
+        await symlink(join(sandboxDir, 'not-a-directory'), join(skillsRoot, 'file-link'))
+
+        const skills = await listSkills()
+
+        expect(skills).toEqual([{ name: 'linked', description: 'Linked skill' }])
+    })
+
     it('lists user skills from ~/.claude/skills', async () => {
         await writeSkill(join(homeDir, '.claude', 'skills', 'claude-skill'), 'claude-skill', 'Claude skill')
 
@@ -105,6 +120,18 @@ describe('listSkills', () => {
         const skills = await listSkills(repoRoot, { flavor: 'grok' })
 
         expect(skills.map((skill) => skill.name)).toEqual(['grok-project', 'grok-user', 'shared'])
+    })
+
+    it('lists Copilot user and project skills alongside shared .agents skills', async () => {
+        const repoRoot = join(sandboxDir, 'copilot-repo')
+        await mkdir(join(repoRoot, '.git'), { recursive: true })
+        await writeSkill(join(homeDir, '.copilot', 'skills', 'copilot-user'), 'copilot-user', 'Copilot user skill')
+        await writeSkill(join(homeDir, '.agents', 'skills', 'shared'), 'shared', 'Shared skill')
+        await writeSkill(join(repoRoot, '.github', 'skills', 'github-skill'), 'github-skill', 'GitHub skill')
+
+        const skills = await listSkills(repoRoot, { flavor: 'copilot' })
+
+        expect(skills.map((skill) => skill.name)).toEqual(['copilot-user', 'github-skill', 'shared'])
     })
 
     it('scopes user skills to the requested flavor', async () => {

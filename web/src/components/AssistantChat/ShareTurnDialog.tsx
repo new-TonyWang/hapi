@@ -1,24 +1,31 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useTranslation } from '@/lib/use-translation'
+import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+import { ZoomableLightbox } from '@/components/ZoomableLightbox'
+import { safeCopyToClipboard } from '@/lib/clipboard'
+import type { ShareTurnMetadataItem } from '@/lib/shareTurnMetadata'
 
 type ShareTurnDialogProps = {
     isOpen: boolean
     title: string
-    subtitle: string
+    metadataItems: ShareTurnMetadataItem[]
     sourceSnapshots: Array<{
         html: string
         text: string
         role?: 'user' | 'assistant'
     }>
+    sourceContentWidth?: number | null
     onClose: () => void
 }
 
 type ShareTurnSnapshot = ShareTurnDialogProps['sourceSnapshots'][number]
 
 const SHARE_EXPORT_WIDTH = 960
+const SHARE_EXPORT_HORIZONTAL_PADDING = 40
 const SHARE_EXPORT_SCALE = 2
 const MAX_EXPORT_PIXELS = 24_000_000
+const SHARE_HIDDEN_CONTENT_SELECTOR = '[data-hapi-share-exclude="true"], .aui-reasoning-group'
 
 function nextFrame(): Promise<void> {
     return new Promise((resolve) => {
@@ -27,8 +34,25 @@ function nextFrame(): Promise<void> {
 }
 
 function stripCaptureOnlyControls(root: HTMLElement): void {
-    for (const element of Array.from(root.querySelectorAll('[data-hapi-share-exclude="true"], .aui-reasoning-group'))) {
-        element.remove()
+    for (const element of Array.from(root.querySelectorAll(SHARE_HIDDEN_CONTENT_SELECTOR))) {
+        if (!(element instanceof HTMLElement) || !root.contains(element)) continue
+
+        let previous = element.previousElementSibling
+        while (previous?.matches(SHARE_HIDDEN_CONTENT_SELECTOR)) previous = previous.previousElementSibling
+        let next = element.nextElementSibling
+        while (next?.matches(SHARE_HIDDEN_CONTENT_SELECTOR)) next = next.nextElementSibling
+
+        const separatesVisibleContent = previous != null
+            && next != null
+            && !previous.matches('.hapi-share-hidden-content-spacer')
+        if (separatesVisibleContent) {
+            const spacer = document.createElement('div')
+            spacer.className = 'hapi-share-hidden-content-spacer'
+            spacer.setAttribute('aria-hidden', 'true')
+            element.replaceWith(spacer)
+        } else {
+            element.remove()
+        }
     }
     for (const element of Array.from(root.querySelectorAll('.happy-message-actions, .happy-message-actions-first-line, [data-hapi-share-action="true"], button[aria-expanded], input, textarea, select'))) {
         element.remove()
@@ -47,6 +71,45 @@ function stripCaptureOnlyControls(root: HTMLElement): void {
     }
 }
 
+function stripExportControls(root: HTMLElement): void {
+    for (const element of Array.from(root.querySelectorAll('[data-hapi-share-export-exclude="true"]'))) {
+        element.remove()
+    }
+    for (const imageButton of Array.from(root.querySelectorAll('button:has(img)'))) {
+        imageButton.removeAttribute('title')
+        imageButton.removeAttribute('aria-label')
+        imageButton.setAttribute('tabindex', '-1')
+    }
+}
+
+function getPreviewCodeBody(control: HTMLElement): HTMLElement | null {
+    const block = control.closest<HTMLElement>('[data-hapi-code-block="true"]')
+    if (block) return block.querySelector<HTMLElement>('[data-hapi-code-body="true"]')
+    const header = control.closest<HTMLElement>('[data-hapi-code-header="true"]')
+    const body = header?.nextElementSibling
+    return body instanceof HTMLElement && body.matches('[data-hapi-code-body="true"]') ? body : null
+}
+
+function setPreviewCodeWrap(control: HTMLElement, enabled: boolean): void {
+    const body = getPreviewCodeBody(control)
+    const grid = body?.querySelector<HTMLElement>('[data-hapi-code-grid="true"]')
+    if (!body || !grid) return
+
+    body.classList.toggle('overflow-x-auto', !enabled)
+    grid.classList.toggle('w-full', enabled)
+    grid.classList.toggle('w-max', !enabled)
+    grid.classList.toggle('min-w-full', !enabled)
+    grid.style.gridTemplateColumns = enabled
+        ? grid.style.gridTemplateColumns.replace(/max-content\s*$/, 'minmax(0, 1fr)')
+        : grid.style.gridTemplateColumns.replace(/minmax\(0,\s*1fr\)\s*$/, 'max-content')
+    grid.style.whiteSpace = enabled ? 'pre-wrap' : 'pre'
+    grid.style.wordBreak = enabled ? 'break-word' : ''
+    for (const cell of Array.from(grid.querySelectorAll<HTMLElement>('[data-code-cell]'))) {
+        cell.style.whiteSpace = enabled ? 'pre-wrap' : 'pre'
+        cell.style.wordBreak = enabled ? 'break-word' : ''
+    }
+}
+
 function formatShareTimestamp(date = new Date()): string {
     const pad = (value: number) => String(value).padStart(2, '0')
     return [
@@ -59,14 +122,38 @@ function formatShareTimestamp(date = new Date()): string {
     ].join('')
 }
 
-function getShareFileName(): string {
-    return `HAPI-${formatShareTimestamp()}.png`
+function sanitizeShareFileNamePart(title: string): string {
+    const withoutControlCharacters = Array.from(title.normalize('NFKC'))
+        .filter((character) => {
+            const codePoint = character.codePointAt(0) ?? 0
+            return codePoint >= 32 && codePoint !== 127
+        })
+        .join('')
+    const sanitized = withoutControlCharacters
+        .replace(/[<>:"/\\|?*]+/g, '-')
+        .replace(/\s+/g, ' ')
+        .replace(/-+/g, '-')
+        .replace(/^[ .-]+|[ .-]+$/g, '')
+        .trim()
+    return Array.from(sanitized || 'Shared turn').slice(0, 80).join('').trim()
 }
 
-function prepareExportElement(element: HTMLElement): HTMLElement {
+function getShareFileName(title: string): string {
+    return `HAPI-${sanitizeShareFileNamePart(title)}-${formatShareTimestamp()}.png`
+}
+
+function prepareExportElement(element: HTMLElement, exportWidth: number, preserveSourceLayout: boolean): HTMLElement {
     const captureElement = element.cloneNode(true)
     if (!(captureElement instanceof HTMLElement)) {
         throw new Error('Failed to prepare shared image')
+    }
+
+    for (const code of Array.from(captureElement.querySelectorAll<HTMLElement>('code'))) {
+        if (code.closest('pre')) continue
+        const textWrapper = document.createElement('span')
+        textWrapper.dataset.hapiInlineCodeText = 'true'
+        while (code.firstChild) textWrapper.appendChild(code.firstChild)
+        code.appendChild(textWrapper)
     }
 
     const elementStyle = getComputedStyle(element)
@@ -76,21 +163,22 @@ function prepareExportElement(element: HTMLElement): HTMLElement {
     const color = elementStyle.color || getComputedStyle(document.documentElement).getPropertyValue('--app-fg').trim() || '#111827'
 
     captureElement.classList.add('hapi-share-export-root')
+    stripExportControls(captureElement)
     captureElement.style.cssText += [
         'position:absolute',
         'left:0',
         'top:0',
         'z-index:-1',
-        `width:${SHARE_EXPORT_WIDTH}px`,
-        `max-width:${SHARE_EXPORT_WIDTH}px`,
+        `width:${exportWidth}px`,
+        `max-width:${exportWidth}px`,
         'box-sizing:border-box',
         'transform:none',
+        'zoom:1',
         'pointer-events:none',
         'overflow:visible',
         '-webkit-text-size-adjust:100%',
         'text-size-adjust:100%',
-        'font-size:14px',
-        'line-height:1.6',
+        ...(preserveSourceLayout ? [] : ['font-size:14px', 'line-height:1.6']),
         `background:${backgroundColor}`,
         `color:${color}`
     ].join(';')
@@ -103,15 +191,40 @@ function prepareExportElement(element: HTMLElement): HTMLElement {
             box-sizing: border-box !important;
             -webkit-text-size-adjust: 100% !important;
             text-size-adjust: 100% !important;
-            font-size: 14px !important;
-            line-height: 1.6 !important;
+            ${preserveSourceLayout ? '' : `
+                font-size: 14px !important;
+                line-height: 1.6 !important;
+            `}
         }
         .hapi-share-export-root [data-hapi-share-exclude="true"],
         .hapi-share-export-root .aui-reasoning-group,
         .hapi-share-export-root button[aria-expanded],
-        .hapi-share-export-root button[title="Copy"] {
+        .hapi-share-export-root [data-hapi-share-export-exclude="true"] {
             display: none !important;
         }
+        .hapi-share-export-root,
+        .hapi-share-export-root * {
+            /* html2canvas-pro renders non-zero letter spacing one grapheme at
+               a time and switches CJK glyphs to an ideographic baseline.
+               Mixed CJK/Latin text then no longer shares the browser's single
+               shaped baseline. Zero spacing keeps each text run intact. */
+            letter-spacing: 0 !important;
+        }
+        .hapi-share-export-root :not(pre) > code {
+            position: relative !important;
+            /* html2canvas-pro paints an inline element's background using its
+               full inherited line box. Collapse the code element's own line
+               box to its em square so the existing block padding produces the
+               same pill height as the browser for both message roles. */
+            line-height: 1em !important;
+        }
+        .hapi-share-export-root [data-hapi-inline-code-text="true"] {
+            /* Move only the monospace glyphs. Keep the inline-code border and
+               background in the same position as the browser layout. */
+            position: relative !important;
+            top: -1px !important;
+        }
+        ${preserveSourceLayout ? '' : `
         .hapi-share-export-root img,
         .hapi-share-export-root video,
         .hapi-share-export-root canvas,
@@ -148,13 +261,19 @@ function prepareExportElement(element: HTMLElement): HTMLElement {
         .hapi-share-export-root button:has(img) > :not(img) {
             display: none !important;
         }
+        `}
         .hapi-share-export-root .sr-only {
             display: none !important;
         }
-        .hapi-share-export-root pre,
-        .hapi-share-export-root code {
-            white-space: pre-wrap !important;
-            overflow-wrap: anywhere !important;
+        .hapi-share-export-root .hapi-share-hidden-content-spacer {
+            display: block !important;
+            height: 0.75rem !important;
+        }
+        .hapi-share-export-root [data-hapi-code-body="true"] {
+            scrollbar-width: none !important;
+        }
+        .hapi-share-export-root [data-hapi-code-body="true"]::-webkit-scrollbar {
+            display: none !important;
         }
     `
     captureElement.prepend(style)
@@ -233,7 +352,6 @@ function copyLoadedStyleSheets(source: Document, target: Document): void {
             // network fallback; same-origin app CSS always takes the inline path.
         }
     }
-
     for (const node of Array.from(source.head.querySelectorAll('link[rel="stylesheet"], style'))) {
         if (copiedOwners.has(node)) continue
         const clone = node.cloneNode(true)
@@ -276,15 +394,18 @@ async function waitForExportReady(root: HTMLElement): Promise<void> {
     await nextFrame()
 }
 
-async function elementToPngBlob(element: HTMLElement): Promise<Blob> {
-    const { default: html2canvas } = await import('html2canvas-pro')
+async function elementToPngBlob(
+    element: HTMLElement,
+    exportWidth: number,
+    preserveSourceLayout: boolean
+): Promise<Blob> {
     const frame = document.createElement('iframe')
     frame.setAttribute('aria-hidden', 'true')
     frame.style.cssText = [
         'position:fixed',
         'left:-10000px',
         'top:0',
-        `width:${SHARE_EXPORT_WIDTH}px`,
+        `width:${exportWidth}px`,
         'height:1000px',
         'border:0',
         'opacity:0',
@@ -311,7 +432,7 @@ async function elementToPngBlob(element: HTMLElement): Promise<Blob> {
     frameDocument.body.setAttribute('style', [
         document.body.getAttribute('style') ?? '',
         'margin:0',
-        `width:${SHARE_EXPORT_WIDTH}px`,
+        `width:${exportWidth}px`,
         'min-height:1000px',
         'overflow:visible',
         'background:transparent'
@@ -323,7 +444,7 @@ async function elementToPngBlob(element: HTMLElement): Promise<Blob> {
 
     copyLoadedStyleSheets(document, frameDocument)
 
-    const captureElement = prepareExportElement(element)
+    const captureElement = prepareExportElement(element, exportWidth, preserveSourceLayout)
     captureElement.style.position = 'static'
     captureElement.style.left = 'auto'
     captureElement.style.top = 'auto'
@@ -336,8 +457,10 @@ async function elementToPngBlob(element: HTMLElement): Promise<Blob> {
         const captureHeight = captureElement.scrollHeight
         const maxScale = Math.sqrt(MAX_EXPORT_PIXELS / Math.max(1, captureWidth * captureHeight))
         const scale = Math.min(SHARE_EXPORT_SCALE, maxScale)
+        const backgroundColor = getComputedStyle(captureElement).backgroundColor || '#ffffff'
+        const { default: html2canvas } = await import('html2canvas-pro')
         canvas = await html2canvas(captureElement, {
-            backgroundColor: getComputedStyle(captureElement).backgroundColor || '#ffffff',
+            backgroundColor,
             foreignObjectRendering: false,
             imageTimeout: 15000,
             logging: false,
@@ -346,7 +469,7 @@ async function elementToPngBlob(element: HTMLElement): Promise<Blob> {
             useCORS: true,
             width: captureWidth,
             height: captureHeight,
-            windowWidth: Math.max(SHARE_EXPORT_WIDTH, captureWidth),
+            windowWidth: Math.max(exportWidth, captureWidth),
             windowHeight: Math.max(document.documentElement.clientHeight, captureHeight),
         })
     } finally {
@@ -379,8 +502,8 @@ function downloadBlob(blob: Blob, fileName: string): void {
     window.setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
-async function shareImageBlob(blob: Blob): Promise<void> {
-    const file = new File([blob], getShareFileName(), { type: blob.type })
+async function shareImageBlob(blob: Blob, fileName: string): Promise<void> {
+    const file = new File([blob], fileName, { type: blob.type })
     if (!navigator.share) {
         throw new Error('Image sharing is not supported in this browser')
     }
@@ -401,7 +524,24 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
     const [restoreTick, setRestoreTick] = useState(0)
     const [ready, setReady] = useState(false)
     const [preparedBlob, setPreparedBlob] = useState<Blob | null>(null)
+    const [previewRevision, setPreviewRevision] = useState(0)
+    const [previewImage, setPreviewImage] = useState<{
+        src: string
+        label: string
+        naturalWidth: number
+        naturalHeight: number
+    } | null>(null)
     const showNativeShareButton = true
+    const usesCoarsePrimaryPointer = window.matchMedia('(pointer: coarse)').matches
+    const preserveSourceLayout = Boolean(
+        props.sourceContentWidth
+        && props.sourceContentWidth > 0
+        && window.matchMedia('(min-width: 640px)').matches
+        && !usesCoarsePrimaryPointer
+    )
+    const exportWidth = preserveSourceLayout
+        ? Math.min(1240, Math.max(480, Math.ceil((props.sourceContentWidth ?? 0) + SHARE_EXPORT_HORIZONTAL_PADDING)))
+        : SHARE_EXPORT_WIDTH
 
     useLayoutEffect(() => {
         setReady(false)
@@ -446,6 +586,7 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
 
         setError(null)
         setCopied(false)
+        setPreviewImage(null)
         return undefined
     }, [props.isOpen, props.sourceSnapshots, restoreTick])
 
@@ -458,7 +599,7 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
 
         let cancelled = false
         setPreparedBlob(null)
-        void elementToPngBlob(capture).then((blob) => {
+        void elementToPngBlob(capture, exportWidth, preserveSourceLayout).then((blob) => {
             if (!cancelled) setPreparedBlob(blob)
         }).catch((err) => {
             if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to create image')
@@ -466,7 +607,65 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
         return () => {
             cancelled = true
         }
-    }, [props.isOpen, props.sourceSnapshots, ready, restoreTick])
+    }, [props.isOpen, props.sourceSnapshots, props.metadataItems, ready, restoreTick, previewRevision, exportWidth, preserveSourceLayout])
+
+    const handlePreviewClick = (event: ReactMouseEvent<HTMLElement>) => {
+        const target = event.target
+        if (!(target instanceof Element)) return
+
+        const wrapButton = target.closest<HTMLButtonElement>('[data-hapi-code-wrap-toggle="true"]')
+        if (wrapButton) {
+            event.preventDefault()
+            event.stopPropagation()
+            if (!getPreviewCodeBody(wrapButton)) return
+            const enabled = wrapButton.getAttribute('aria-pressed') !== 'true'
+            wrapButton.setAttribute('aria-pressed', String(enabled))
+            wrapButton.title = enabled
+                ? (wrapButton.dataset.hapiWrapDisableLabel ?? '')
+                : (wrapButton.dataset.hapiWrapEnableLabel ?? '')
+            setPreviewCodeWrap(wrapButton, enabled)
+            setPreparedBlob(null)
+            setPreviewRevision((revision) => revision + 1)
+            return
+        }
+
+        const copyButton = target.closest<HTMLButtonElement>('[data-hapi-code-copy="true"]')
+        if (copyButton) {
+            event.preventDefault()
+            event.stopPropagation()
+            const body = getPreviewCodeBody(copyButton)
+            const cells = Array.from(body?.querySelectorAll<HTMLElement>('[data-code-cell]') ?? [])
+            const code = (cells.length > 0
+                ? cells.map((cell) => cell.textContent ?? '').join('\n')
+                : body?.querySelector('pre')?.textContent ?? '')
+            if (!code) return
+            void safeCopyToClipboard(code).then(() => {
+                copyButton.querySelector('[data-hapi-copy-default="true"]')?.classList.add('hidden')
+                copyButton.querySelector('[data-hapi-copy-success="true"]')?.classList.remove('hidden')
+                copyButton.title = copyButton.dataset.hapiCopiedLabel ?? copyButton.title
+                window.setTimeout(() => {
+                    if (!copyButton.isConnected) return
+                    copyButton.querySelector('[data-hapi-copy-default="true"]')?.classList.remove('hidden')
+                    copyButton.querySelector('[data-hapi-copy-success="true"]')?.classList.add('hidden')
+                    copyButton.title = copyButton.dataset.hapiCopyLabel ?? copyButton.title
+                }, 1500)
+            }).catch(() => undefined)
+            return
+        }
+
+        const imageButton = target.closest<HTMLButtonElement>('[data-image-preview-trigger]')
+        const image = imageButton?.querySelector<HTMLImageElement>('img')
+        if (image) {
+            event.preventDefault()
+            event.stopPropagation()
+            setPreviewImage({
+                src: image.currentSrc || image.src,
+                label: image.alt || imageButton?.dataset.imagePreviewLabel || 'Image preview',
+                naturalWidth: image.naturalWidth || image.width,
+                naturalHeight: image.naturalHeight || image.height
+            })
+        }
+    }
 
     const runBlobAction = (
         blob: Blob,
@@ -504,11 +703,9 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
         setBusy(mode)
         setError(null)
         try {
-            const blob = await elementToPngBlob(capture)
+            const blob = await elementToPngBlob(capture, exportWidth, preserveSourceLayout)
             await action(blob)
-            if (mode === 'copy') {
-                setCopied(true)
-            }
+            if (mode === 'copy') setCopied(true)
         } catch (err) {
             setError(err instanceof Error ? err.message : 'Failed to create image')
         } finally {
@@ -518,24 +715,59 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
 
     return (
         <Dialog open={props.isOpen} onOpenChange={(open) => { if (!open) props.onClose() }}>
-            <DialogContent className="max-h-[calc(100vh-24px)] max-w-3xl overflow-hidden p-4" aria-describedby={undefined}>
-                <DialogHeader>
+            <DialogContent
+                className="max-h-[calc(100vh-24px)] max-w-3xl overflow-hidden p-4 [&>button:last-child]:top-4"
+                aria-describedby={undefined}
+            >
+                <DialogHeader className="h-8 justify-center !px-10 text-center sm:text-center">
                     <DialogTitle>{t('shareTurn.title')}</DialogTitle>
                 </DialogHeader>
 
                 <div className="mt-3 max-h-[58vh] overflow-auto rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg)] p-2 sm:max-h-[65vh] sm:p-3">
                     <div
                         ref={captureRef}
-                        className="mx-auto w-[720px] max-w-full rounded-[28px] bg-[var(--app-bg)] p-4 text-[var(--app-fg)] sm:p-5"
+                        onClick={handlePreviewClick}
+                        className="hapi-share-preview-root mx-auto w-[720px] max-w-full rounded-[28px] bg-[var(--app-bg)] p-4 text-[var(--app-fg)] sm:p-5"
                     >
-                        <div className="mb-4 flex items-start justify-between gap-3 border-b border-[var(--app-divider)] pb-3">
+                        <style>{`
+                            .hapi-share-preview-root .hapi-share-hidden-content-spacer {
+                                display: block !important;
+                                height: 0.75rem !important;
+                            }
+                            .hapi-share-preview-root .hapi-share-media-grid[data-hapi-image-count="2"] {
+                                flex-wrap: nowrap !important;
+                            }
+                            .hapi-share-preview-root .hapi-share-media-grid > button {
+                                height: auto !important;
+                                align-self: start !important;
+                                flex-shrink: 1 !important;
+                                min-width: 0 !important;
+                                cursor: zoom-in !important;
+                                pointer-events: auto !important;
+                            }
+                            .hapi-share-preview-root .hapi-share-media-grid > button > img {
+                                width: auto !important;
+                                max-width: 100% !important;
+                                height: auto !important;
+                            }
+                        `}</style>
+                        <div className="mb-4 border-b border-[var(--app-divider)] pb-3">
                             <div className="min-w-0">
-                                <div className="text-lg font-semibold">HAPI</div>
-                                <div className="mt-1 truncate text-xs text-[var(--app-hint)]">{props.title}</div>
-                                <div className="mt-0.5 truncate text-xs text-[var(--app-hint)]">{props.subtitle}</div>
-                            </div>
-                            <div className="rounded-full border border-[var(--app-border)] px-2 py-1 text-[10px] text-[var(--app-hint)]">
-                                {t('shareTurn.badge')}
+                                <div className="truncate text-lg font-semibold">{props.title}</div>
+                                {props.metadataItems.length > 0 ? (
+                                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)]">
+                                        {props.metadataItems.map((item) => item.key === 'agent' ? (
+                                            <span key={item.key} className="inline-flex items-center gap-1">
+                                                <AgentFlavorIcon flavor={item.flavor} className="h-3.5 w-3.5 shrink-0" />
+                                                {item.text}
+                                            </span>
+                                        ) : (
+                                            <span key={item.key} className={item.key === 'fastMode' ? 'text-[#34C759]' : undefined}>
+                                                {item.text}
+                                            </span>
+                                        ))}
+                                    </div>
+                                ) : null}
                             </div>
                         </div>
                         <div ref={bodyRef} data-hapi-share-body="true" className="flex flex-col gap-3" />
@@ -544,6 +776,27 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
                         </div>
                     </div>
                 </div>
+                {previewImage ? (
+                    <ZoomableLightbox
+                        open
+                        onClose={() => setPreviewImage(null)}
+                        title={previewImage.label}
+                        ariaLabel={previewImage.label}
+                        fitContentKey={previewImage.src}
+                        fitContentSize={previewImage.naturalWidth > 0 && previewImage.naturalHeight > 0
+                            ? { width: previewImage.naturalWidth, height: previewImage.naturalHeight }
+                            : null}
+                    >
+                        <img
+                            src={previewImage.src}
+                            alt={previewImage.label}
+                            width={previewImage.naturalWidth || undefined}
+                            height={previewImage.naturalHeight || undefined}
+                            className="block max-w-none select-none object-contain"
+                            draggable={false}
+                        />
+                    </ZoomableLightbox>
+                ) : null}
 
                 {error ? (
                     <div className="rounded-md bg-red-500/10 px-3 py-2 text-sm text-red-600">{error}</div>
@@ -552,24 +805,23 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
                 <div className="mt-4 grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:justify-end">
                     <button
                         type="button"
-                        onClick={props.onClose}
-                        className="rounded-md border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] hover:bg-[var(--app-secondary-bg)] sm:w-32"
-                    >
-                        {t('shareTurn.cancel')}
-                    </button>
-                    <button
-                        type="button"
                         onClick={() => { void withPng(copyImageBlob, 'copy') }}
                         disabled={busy !== null || !ready}
                         className="hidden rounded-md border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] hover:bg-[var(--app-secondary-bg)] disabled:opacity-50 sm:inline-block sm:w-32"
                     >
-                        {busy === 'copy' ? t('shareTurn.copying') : copied ? t('shareTurn.copied') : t('shareTurn.copy')}
+                        {copied ? t('shareTurn.copied') : t('shareTurn.copy')}
                     </button>
                     {showNativeShareButton ? (
                         <button
                             type="button"
                             onClick={() => {
-                                if (preparedBlob) runBlobAction(preparedBlob, shareImageBlob, 'share')
+                                if (preparedBlob) {
+                                    runBlobAction(
+                                        preparedBlob,
+                                        (blob) => shareImageBlob(blob, getShareFileName(props.title)),
+                                        'share'
+                                    )
+                                }
                             }}
                             disabled={busy !== null || !preparedBlob}
                             className="rounded-md border border-[var(--app-border)] px-3 py-2 text-sm text-[var(--app-fg)] hover:bg-[var(--app-secondary-bg)] disabled:opacity-50 sm:w-32"
@@ -580,10 +832,10 @@ export function ShareTurnDialog(props: ShareTurnDialogProps) {
                     <button
                         type="button"
                         onClick={() => {
-                            void withPng((blob) => downloadBlob(blob, getShareFileName()), 'download')
+                            void withPng((blob) => downloadBlob(blob, getShareFileName(props.title)), 'download')
                         }}
                         disabled={busy !== null || !ready}
-                        className="col-span-2 rounded-md bg-[var(--app-button)] px-3 py-2 text-sm text-[var(--app-button-text)] disabled:opacity-50 sm:col-span-1 sm:w-32"
+                        className="rounded-md bg-[var(--app-button)] px-3 py-2 text-sm text-[var(--app-button-text)] disabled:opacity-50 sm:w-32"
                     >
                         {busy === 'download' ? t('shareTurn.saving') : t('shareTurn.download')}
                     </button>

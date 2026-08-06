@@ -97,4 +97,24 @@ describe('Query', () => {
 
         await expect(result.next()).rejects.toThrow('prompt failed')
     })
+
+    it('places additional launch arguments before HAPI settings', async () => {
+        const child = createFakeChild()
+        spawnMock.mockReturnValueOnce(child)
+        process.env.HAPI_CLAUDE_PATH = 'claude'
+
+        const { query } = await import('./query')
+        query({
+            prompt: 'hello',
+            options: {
+                additionalArgs: ['--plugin-dir', '/tmp/plugin'],
+                settingsPath: '/tmp/hapi-settings.json'
+            }
+        })
+
+        const args = spawnMock.mock.calls[0][1] as string[]
+        expect(args.indexOf('--plugin-dir')).toBeLessThan(args.indexOf('--settings'))
+        child.stdout.end()
+        child.emit('close', 0)
+    })
 })

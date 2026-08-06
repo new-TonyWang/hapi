@@ -28,6 +28,11 @@ See `src/configuration.ts` for all options.
 
 - `ELEVENLABS_API_KEY` - ElevenLabs API key for voice assistant.
 - `ELEVENLABS_AGENT_ID` - Custom ElevenLabs agent ID (auto-created if not set).
+- `OPENAI_API_KEY` - OpenAI dictation (`gpt-transcribe` / `gpt-live-transcribe`).
+- `DEEPGRAM_API_KEY` - Deepgram dictation (`nova-3`, standard and realtime).
+- `GROQ_API_KEY` - Groq dictation (`whisper-large-v3`).
+- `TRANSCRIPTION_BASE_URL` and `TRANSCRIPTION_MODEL` - OpenAI-compatible/local transcription endpoint and model.
+- `TRANSCRIPTION_API_KEY` - Optional bearer token for the OpenAI-compatible endpoint.
 
 ### Optional
 
@@ -38,7 +43,7 @@ See `src/configuration.ts` for all options.
 - `DB_PATH` - SQLite database path (default: HAPI_HOME/hapi.db).
 - `TELEGRAM_NOTIFICATION` - Enable/disable Telegram notifications (default: true).
 - `HAPI_RELAY_API` - Relay API domain (default: relay.hapi.run).
-- `HAPI_RELAY_AUTH` - Relay auth key (default: hapi).
+- `HAPI_RELAY_AUTH` - Explicit relay auth key. By default the hub obtains and persists an individually revocable key from the relay. A persisted key rejected with HTTP 403 is discarded and reissued once; an explicitly configured environment key must be updated manually.
 - `HAPI_RELAY_FORCE_TCP` - Force TCP relay mode (true/1).
 - `VAPID_SUBJECT` - Contact email/URL for Web Push.
 
@@ -110,6 +115,10 @@ See `src/web/routes/` for all endpoints.
 - `POST /api/machines/:id/spawn` - Spawn new session on machine.
 - `POST /api/machines/:id/paths/exists` - Check if path exists.
 
+### Usage (`src/web/routes/usage.ts`)
+
+- `GET /api/usage/summary` - Get cache-aware token usage for the owner namespace (`range=7d|30d|all`).
+
 ### Git/Files (`src/web/routes/git.ts`)
 
 - `GET /api/sessions/:id/git-status` - Git status.
@@ -126,6 +135,9 @@ See `src/web/routes/` for all endpoints.
 ### Voice (`src/web/routes/voice.ts`)
 
 - `POST /api/voice/token` - Get ElevenLabs conversation token.
+- `GET /api/voice/transcription/providers` - List configured providers and supported modes.
+- `POST /api/voice/transcription` - Transcribe a bounded recording.
+- `POST /api/voice/transcription/realtime-token` - Mint a short-lived OpenAI, ElevenLabs, or Deepgram credential.
 
 ### Push Notifications (`src/web/routes/push.ts`)
 
@@ -210,6 +222,19 @@ See `src/store/index.ts` for SQLite persistence:
 - Machines with runner state.
 - Todo extraction from messages.
 - Users table for Telegram bindings (includes namespace).
+
+Message content is stored via `src/store/contentCodec.ts`: oversized strings
+inside agent messages (giant tool output) are head+tail truncated at ingest,
+and payloads ≥256 chars are zstd-compressed (TEXT = plaintext JSON, BLOB =
+zstd). User prompts are never truncated — queued rows are delivered to the CLI
+verbatim.
+
+Maintenance scripts (run with the hub stopped before swapping files):
+
+- `scripts/compact-db.ts` — retroactively truncate + compress + VACUUM an
+  existing DB into a new file (the source is only opened read-only).
+- `scripts/cleanup-sessions.ts` — bulk-delete sessions by message count, path
+  glob, or first-message pattern.
 
 ## Source structure
 

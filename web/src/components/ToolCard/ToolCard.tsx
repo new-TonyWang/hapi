@@ -1,7 +1,7 @@
 import type { ChatBlock, ChatToolCall, ToolCallBlock } from '@/chat/types'
 import type { ApiClient } from '@/api/client'
 import type { SessionMetadataSummary } from '@/types/api'
-import { memo, useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import { getClaudeModelLabel, isObject, safeStringify } from '@hapi/protocol'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { CodeBlock } from '@/components/CodeBlock'
@@ -198,16 +198,19 @@ export function formatSubagentModelLabel(model: string): string {
  * the same "seenModels" pattern `aggregateResponseGroups`
  * (web/src/lib/assistant-runtime.ts) already uses for top-level multi-turn
  * message metadata, reused here rather than inventing a new convention — then
- * formats each for display and joins them.
+ * formats each for display and joins them. When a backend does not expose
+ * child messages, an explicit per-invocation model is still authoritative.
+ * The caller/session model is deliberately never used as a fallback.
  */
-export function getSubagentModel(children: ChatBlock[]): string | null {
+export function getSubagentModel(children: ChatBlock[], explicitModel?: string | null): string | null {
     const seenModels: string[] = []
     for (const child of children) {
         if ('model' in child && child.model && !seenModels.includes(child.model)) {
             seenModels.push(child.model)
         }
     }
-    return seenModels.length > 0 ? seenModels.map(formatSubagentModelLabel).join(', ') : null
+    if (seenModels.length > 0) return seenModels.map(formatSubagentModelLabel).join(', ')
+    return explicitModel ? formatSubagentModelLabel(explicitModel) : null
 }
 
 function getTaskSummaryChildren(block: ToolCallBlock): { visible: ToolCallBlock[]; remaining: number } | null {
@@ -270,6 +273,12 @@ function renderToolInput(block: ToolCallBlock, surface: 'inline' | 'dialog' = 'i
         : { showWrapToggle: false }
     const toolName = block.tool.name
     const input = block.tool.input
+
+    // No invocation input (e.g. agy's async background-task results): show a
+    // muted placeholder instead of dumping the literal "undefined"/"null".
+    if (input === undefined || input === null) {
+        return <div className="text-xs text-[var(--app-hint)]">—</div>
+    }
 
     if (isSubagentToolName(toolName) && isObject(input) && typeof input.prompt === 'string') {
         return <MarkdownRenderer content={input.prompt} />
@@ -420,11 +429,14 @@ function ToolCardInner(props: ToolCardProps) {
     const toolTitle = presentation.title
     const subtitle = presentation.subtitle ?? props.block.tool.description
     const taskSummary = renderTaskSummary(props.block, props.metadata, t)
-    const subagentModel = isSubagentToolName(toolName) ? getSubagentModel(props.block.children) : null
+    const subagentModel = isSubagentToolName(toolName)
+        ? getSubagentModel(props.block.children, getInputStringAny(props.block.tool.input, ['model']))
+        : null
     const isCodexAgentCard = toolName === 'CodexAgent'
     const useCompactTerminalCard = shouldUseCompactTerminalToolCard(toolName, props.terminalToolDisplayMode)
     const showInline = shouldShowInlineToolCardBody(toolName, presentation.minimal, props.terminalToolDisplayMode)
     const CompactToolView = showInline ? getToolViewComponent(toolName) : null
+    const compactViewOwnsInteractions = toolName === 'CodexDiff'
     const ResultToolView = getToolResultViewComponent(toolName)
     const permission = props.block.tool.permission
     const isAskUserQuestion = isAskUserQuestionToolName(toolName)
@@ -435,17 +447,25 @@ function ToolCardInner(props: ToolCardProps) {
         || ((permission.status === 'denied' || permission.status === 'canceled') && Boolean(permission.reason))
     ))
     const hasBody = showInline || taskSummary !== null || showsPermissionFooter
+    // Header/content padding already supplies 12-16px below timing; add only
+    // the remainder needed to match the detail dialog's 16px section gap.
+    const inlineBodySpacing = props.block.tool.state === 'pending'
+        ? 'mt-3'
+        : (subtitle ? 'mt-1' : 'mt-0')
     const stateColor = toolStatusColorClass(props.block.tool.state)
     const { suppressFocusRing, onTriggerPointerDown, onTriggerKeyDown, onTriggerBlur } = usePointerFocusRing()
+    const inlineDetailInvokerRef = useRef<HTMLElement | null>(null)
     const openDetails = () => setDetailsOpen(true)
     const openDetailsFromInlinePreview = (event: MouseEvent<HTMLElement>) => {
         if (isNestedInteractiveElement(event)) return
+        inlineDetailInvokerRef.current = event.currentTarget
         openDetails()
     }
     const openDetailsFromInlinePreviewKeyDown = (event: KeyboardEvent<HTMLElement>) => {
         if (isNestedInteractiveElement(event)) return
         if (event.key === 'Enter' || event.key === ' ') {
             event.preventDefault()
+            inlineDetailInvokerRef.current = event.currentTarget
             openDetails()
         }
     }
@@ -516,8 +536,19 @@ function ToolCardInner(props: ToolCardProps) {
                             {header}
                         </button>
                     </DialogTrigger>
-                    <DialogContent className="max-w-2xl" aria-describedby={undefined}>
-                        <DialogHeader>
+                    <DialogContent
+                        className="max-w-2xl"
+                        closeButtonClassName="top-2"
+                        aria-describedby={undefined}
+                        onCloseAutoFocus={(event) => {
+                            const invoker = inlineDetailInvokerRef.current
+                            if (!invoker?.isConnected) return
+                            event.preventDefault()
+                            invoker.focus()
+                            inlineDetailInvokerRef.current = null
+                        }}
+                    >
+                        <DialogHeader className="text-left">
                             <DialogTitle>{toolTitle}</DialogTitle>
                         </DialogHeader>
                         <ToolDetailDialogContent block={props.block} metadata={props.metadata} />
@@ -535,8 +566,15 @@ function ToolCardInner(props: ToolCardProps) {
 
                     {showInline ? (
                         CompactToolView ? (
-                            <div
-                                className="mt-3 cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                            compactViewOwnsInteractions ? (
+                                <div className={cn(inlineBodySpacing, 'rounded-xl')}>
+                                    <CompactToolView block={props.block} metadata={props.metadata} surface="inline" />
+                                </div>
+                            ) : <div
+                                className={cn(
+                                    inlineBodySpacing,
+                                    'cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]'
+                                )}
                                 role="button"
                                 tabIndex={0}
                                 onClick={openDetailsFromInlinePreview}
@@ -545,7 +583,7 @@ function ToolCardInner(props: ToolCardProps) {
                                 <CompactToolView block={props.block} metadata={props.metadata} surface="inline" />
                             </div>
                         ) : (
-                            <div className="mt-3 flex flex-col gap-3">
+                            <div className={cn(inlineBodySpacing, 'flex flex-col gap-4')}>
                                 <div
                                     className="cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
                                     role="button"

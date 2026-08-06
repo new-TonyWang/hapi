@@ -4,6 +4,8 @@ import type { ApiClient } from '@/api/client'
 import type { TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import type { SessionMetadataSummary } from '@/types/api'
 
+export type OlderHistoryLoadResult = 'loaded' | 'transient-stop' | 'terminal-stop'
+
 export type HappyChatContextValue = {
     api: ApiClient
     sessionId: string
@@ -12,14 +14,19 @@ export type HappyChatContextValue = {
     disabled: boolean
     onRefresh: () => void
     onRetryMessage?: (localId: string) => void
+    historyActionPending?: boolean
+    onForkConversation?: (messageLocalId?: string) => Promise<void>
+    onRewindConversation?: (messageLocalId: string) => Promise<void>
+    isLatestCompletedBoundary?: (messageId: string) => boolean
     onShareTurn?: (
         messageElement: HTMLElement | string | null,
         clientY?: number,
         fallbackSnapshot?: { html: string; text: string; role?: 'user' | 'assistant' }
     ) => void
     hasMoreMessages: boolean
+    isSyncingTail: boolean
     isLoadingMoreMessages: boolean
-    loadOlderMessagesPreservingScroll: () => Promise<boolean>
+    loadOlderMessagesPreservingScroll: () => Promise<OlderHistoryLoadResult>
 }
 
 const HappyChatContext = createContext<HappyChatContextValue | null>(null)

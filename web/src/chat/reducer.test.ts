@@ -166,6 +166,83 @@ describe('reduceChatBlocks', () => {
         })
     })
 
+    it('ignores Claude subagent usage when calculating parent latest usage', () => {
+        // Claude never stamps scope_role, so a Task subagent's assistant
+        // messages look like ordinary parent usage apart from isSidechain.
+        // Letting them through made the status bar's ctx numerator collapse
+        // while a subagent ran and snap back when the parent resumed.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'parent-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                usage: {
+                    input_tokens: 500,
+                    output_tokens: 20,
+                    cache_read_input_tokens: 120_000,
+                    context_window: 200_000
+                }
+            },
+            {
+                id: 'subagent-turn',
+                localId: null,
+                createdAt: 1_700_000_001_000,
+                role: 'agent',
+                content: [],
+                isSidechain: true,
+                parentToolUseId: 'tc-task-1',
+                usage: {
+                    input_tokens: 300,
+                    output_tokens: 5,
+                    cache_read_input_tokens: 8_000,
+                    context_window: 200_000
+                }
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            inputTokens: 500,
+            outputTokens: 20,
+            cacheRead: 120_000,
+            contextSize: 120_500
+        })
+    })
+
+    it('carries the usage message model for the context-window heuristic', () => {
+        // Local-mode Claude transcripts have no context_window in usage and
+        // session.model is often null, so latestUsage.model is the only
+        // signal the status bar has to resolve a plausible window.
+        const messages: NormalizedMessage[] = [
+            {
+                id: 'local-turn',
+                localId: null,
+                createdAt: 1_700_000_000_000,
+                role: 'agent',
+                content: [],
+                isSidechain: false,
+                model: 'claude-fable-5',
+                usage: {
+                    input_tokens: 2,
+                    output_tokens: 50,
+                    cache_read_input_tokens: 250_000
+                }
+            }
+        ] as NormalizedMessage[]
+
+        const reduced = reduceChatBlocks(messages, null)
+
+        expect(reduced.latestUsage).toMatchObject({
+            contextSize: 250_002,
+            contextWindow: null,
+            model: 'claude-fable-5'
+        })
+    })
+
     it('keeps active goals visible across later normal user messages', () => {
         const reduced = reduceChatBlocks([
             goalMessage('goal-active', 'active', 1),

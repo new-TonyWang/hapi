@@ -16,6 +16,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         activeAt: 0,
         updatedAt: 0,
         metadata: null,
+        metadataVersion: 0,
+        agentStateVersion: 0,
+        todosUpdatedAt: 0,
         todoProgress: null,
         pendingRequestsCount: 0,
         pendingRequestKinds: [],
@@ -92,6 +95,7 @@ describe('SessionList machine filter', () => {
         ])
 
         expect(screen.queryByRole('group', { name: 'Filter sessions by machine' })).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Filter sessions by machine' })).toBeNull()
         expect(screen.getByTitle('/work/hapi')).toBeTruthy()
     })
 
@@ -128,6 +132,8 @@ describe('SessionList machine filter', () => {
         renderSessionList(multiMachineSessions)
 
         expect(screen.getByRole('group', { name: 'Filter sessions by machine' })).toBeTruthy()
+        // Mobile (below md) counterpart: a compact filter icon button in the header
+        expect(screen.getByRole('button', { name: 'Filter sessions by machine' })).toBeTruthy()
         expect(screen.getByRole('button', { name: /All \(2\)/ })).toBeTruthy()
         expect(screen.getByText('work/hapi · Mint')).toBeTruthy()
         expect(screen.getByText('work/docs · Teemo')).toBeTruthy()
@@ -168,6 +174,7 @@ describe('SessionList machine filter', () => {
             })
         ])
 
+        fireEvent.click(screen.getByRole('button', { name: 'Search sessions' }))
         fireEvent.change(screen.getByPlaceholderText('Search sessions…'), { target: { value: 'alpha' } })
         fireEvent.click(screen.getByRole('button', { name: /Teemo \(1\)/ }))
 

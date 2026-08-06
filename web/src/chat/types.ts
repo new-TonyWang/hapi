@@ -29,6 +29,7 @@ export type AgentEvent =
     | { type: 'recap'; text: string }
     | { type: 'thread-goal-updated'; goal: ThreadGoal; threadId?: string; turnId?: string }
     | { type: 'thread-goal-cleared'; threadId?: string }
+    | { type: 'abort-restore'; text: string }
     | ({ type: string } & Record<string, unknown>)
 
 export type ToolResultPermission = {
@@ -47,6 +48,7 @@ export type ToolUse = {
     description: string | null
     nativeTitle?: string | null
     nativeKind?: string | null
+    progress?: unknown
     uuid: string
     parentUUID: string | null
 }
@@ -92,6 +94,7 @@ export type NormalizedAgentContent =
         type: 'text'
         text: string
         uuid: string
+        streamId?: string
         parentUUID: string | null
     }
     | {

@@ -61,6 +61,10 @@ describe('ToolCard terminal display mode helpers', () => {
         expect(shouldShowInlineToolCardBody('Task', false, 'detailed')).toBe(false)
         expect(shouldShowInlineToolCardBody('Agent', false, 'detailed')).toBe(false)
         expect(shouldShowInlineToolCardBody('Read', true, 'detailed')).toBe(false)
+        expect(shouldShowInlineToolCardBody('Edit', true, 'detailed')).toBe(false)
+        expect(shouldShowInlineToolCardBody('MultiEdit', true, 'detailed')).toBe(false)
+        expect(shouldShowInlineToolCardBody('Write', true, 'detailed')).toBe(false)
+        expect(shouldShowInlineToolCardBody('CodexDiff', true, 'detailed')).toBe(false)
     })
 })
 
@@ -167,6 +171,17 @@ describe('getSubagentModel', () => {
     it('returns null when no child carries a model', () => {
         const children: ChatBlock[] = [makeAgentTextBlock({ model: null }), makeToolCallChild({ model: null })]
         expect(getSubagentModel(children)).toBeNull()
+    })
+
+    it('uses an explicit invocation model when child messages do not expose one', () => {
+        expect(getSubagentModel([], 'gpt-5.6-terra')).toBe('gpt-5.6-terra')
+    })
+
+    it('prefers the executed child model over an explicit invocation model', () => {
+        expect(getSubagentModel(
+            [makeAgentTextBlock({ model: 'claude-haiku-4-5-20251001' })],
+            'gpt-5.6-terra'
+        )).toBe('Haiku 4.5')
     })
 
     it('returns the single formatted model when every carrying child agrees, across mixed block kinds', () => {

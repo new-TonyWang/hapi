@@ -8,7 +8,7 @@ import { AGENT_MESSAGE_PAYLOAD_TYPE } from '@hapi/protocol'
 import { Store } from '../../store'
 import type { Machine, SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
-import { createCodexDesktopRoutes, importSelectedCodexSessions } from './codexDesktop'
+import { createCodexDesktopRoutes, getDarwinCodexOpenArgs, importSelectedCodexSessions } from './codexDesktop'
 
 const originalCodexHome = process.env.CODEX_HOME
 
@@ -885,6 +885,47 @@ describe('Codex Desktop import routes', () => {
         }
     })
 
+    it('applies selected Standard and Plan config before an imported session is resumed', async () => {
+        const codexHome = mkdtempSync(join(tmpdir(), 'hapi-codex-home-config-test-'))
+        const store = new Store(':memory:')
+        const codexSessionId = '23232323-2323-4232-8232-232323232323'
+        process.env.CODEX_HOME = codexHome
+
+        try {
+            createTranscript(codexHome, codexSessionId, '/home/user/workspace/project')
+            const engine = createImportSyncEngine(store, [
+                createMachine('machine-1', ['/home/user/workspace'])
+            ])
+            const applied: Array<{ sessionId: string; config: unknown }> = []
+            ;(engine as unknown as { applySessionConfig: (sessionId: string, config: unknown) => Promise<void> }).applySessionConfig = async (sessionId, config) => {
+                applied.push({ sessionId, config })
+            }
+
+            const result = await importSelectedCodexSessions({
+                codexSessionIds: [codexSessionId],
+                store,
+                namespace: 'default',
+                getSyncEngine: () => engine,
+                serviceTier: 'standard',
+                collaborationMode: 'plan'
+            })
+
+            expect(result.success).toBe(true)
+            const importedSessionId = result.success ? result.hapiSessionIds?.[0] : undefined
+            expect(importedSessionId).toBeDefined()
+            if (!importedSessionId) {
+                throw new Error('Imported session id missing')
+            }
+            expect(applied).toEqual([{
+                sessionId: importedSessionId,
+                config: { serviceTier: 'standard', collaborationMode: 'plan' }
+            }])
+        } finally {
+            store.close()
+            rmSync(codexHome, { recursive: true, force: true })
+        }
+    })
+
     it('binds imported transcripts to the unique online machine that owns the cwd', async () => {
         const codexHome = mkdtempSync(join(tmpdir(), 'hapi-codex-home-machine-test-'))
         const store = new Store(':memory:')
@@ -1366,5 +1407,15 @@ describe('Codex Desktop import routes', () => {
         expect(body.duplicates).toHaveLength(1)
         expect(body.duplicates[0]?.codexSessionId).toBe('original-session-id')
         expect(body.duplicates[0]?.hapiSessionIds.sort()).toEqual([dupSession.id, forkSession.id].sort())
+    })
+})
+
+describe('Codex Desktop restart helpers', () => {
+    it('opens a concrete macOS app bundle path directly', () => {
+        expect(getDarwinCodexOpenArgs('/Applications/Codex.app')).toEqual(['/Applications/Codex.app'])
+    })
+
+    it('uses open -a for a macOS application name', () => {
+        expect(getDarwinCodexOpenArgs('Codex')).toEqual(['-a', 'Codex'])
     })
 })

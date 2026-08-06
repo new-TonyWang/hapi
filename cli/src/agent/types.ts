@@ -29,7 +29,7 @@ export type PlanItem = {
 };
 
 export type AgentMessage =
-    | { type: 'text'; text: string }
+    | { type: 'text'; text: string; id?: string; live?: boolean; streamSnapshot?: boolean }
     | { type: 'reasoning'; text: string; id?: string; live?: boolean }
     | {
         type: 'tool_call';
@@ -39,6 +39,7 @@ export type AgentMessage =
         status: 'pending' | 'in_progress' | 'completed' | 'failed';
         title?: string;
         kind?: string;
+        progress?: unknown;
     }
     | { type: 'tool_result'; id: string; output: unknown; status: 'completed' | 'failed' }
     | {
@@ -48,6 +49,7 @@ export type AgentMessage =
         totalTokens?: number;
         thoughtTokens?: number;
         cacheReadTokens?: number;
+        cacheCreationTokens?: number;
         contextTokens?: number;
         contextWindow?: number;
     }

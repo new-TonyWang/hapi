@@ -237,7 +237,7 @@ describe('ScratchlistPanel', () => {
         renderPanel()
         expandPanel()
 
-        const copyBtn = screen.getByRole('button', { name: 'Copy to clipboard' })
+        const copyBtn = screen.getByRole('button', { name: 'Copy text to clipboard (not images)' })
         fireEvent.click(copyBtn)
 
         await waitFor(() => expect(writeText).toHaveBeenCalledWith('copy me'))
@@ -272,12 +272,12 @@ describe('ScratchlistPanel', () => {
         renderPanel()
         expandPanel()
 
-        fireEvent.click(screen.getByRole('button', { name: 'Copy to clipboard' }))
+        fireEvent.click(screen.getByRole('button', { name: 'Copy text to clipboard (not images)' }))
 
         await waitFor(() => expect(writeText).toHaveBeenCalled())
         // Should NOT flip to "Copied!" because the copy failed.
         expect(screen.queryByRole('button', { name: 'Copied!' })).toBeNull()
-        expect(screen.getByRole('button', { name: 'Copy to clipboard' })).toBeTruthy()
+        expect(screen.getByRole('button', { name: 'Copy text to clipboard (not images)' })).toBeTruthy()
     })
 
     it('persists collapse state across mounts for the same session', () => {
@@ -305,5 +305,119 @@ describe('ScratchlistPanel', () => {
         fireEvent.click(b.getByRole('button', { name: /Scratchlist/ }))
         expect(b.getByText('B note')).toBeTruthy()
         expect(b.queryByText('A note')).toBeNull()
+    })
+
+    it('renders the per-entry age indicator with a tooltip showing the smart-relative time', () => {
+        // 5 minutes ago, deterministic via fake timers below.
+        vi.useFakeTimers()
+        const now = new Date('2026-06-13T17:00:00Z').getTime()
+        vi.setSystemTime(new Date(now))
+        try {
+            persistScratchlist(SID, [
+                makeEntry({
+                    id: 'aged',
+                    text: 'aged note',
+                    createdAt: now - 10 * 60_000,
+                    updatedAt: now - 5 * 60_000,
+                }),
+            ])
+            renderPanel()
+            expandPanel()
+            const indicator = screen.getByTestId('scratchlist-entry-age')
+            // Tooltip carries the smart-relative time + an absolute
+            // timestamp; aria-label carries the relative time only.
+            const title = indicator.getAttribute('title') ?? ''
+            expect(title).toContain('5m ago')
+            expect(title).toContain('Saved')
+            const aria = indicator.getAttribute('aria-label') ?? ''
+            expect(aria).toContain('5m ago')
+            // data-entry-age mirrors the relative bucket so a future
+            // assertion can target it without scraping the title.
+            expect(indicator.getAttribute('data-entry-age')).toBe('5m ago')
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('falls back to createdAt when updatedAt is absent (legacy v1 row)', () => {
+        vi.useFakeTimers()
+        const now = new Date('2026-06-13T17:00:00Z').getTime()
+        vi.setSystemTime(new Date(now))
+        try {
+            persistScratchlist(SID, [
+                makeEntry({
+                    id: 'legacy',
+                    text: 'legacy v1 note',
+                    createdAt: now - 2 * 60 * 60_000,
+                    // updatedAt deliberately omitted - simulates a
+                    // localStorage row written by v1 before the v2 hub
+                    // sync work added the column.
+                }),
+            ])
+            renderPanel()
+            expandPanel()
+            const indicator = screen.getByTestId('scratchlist-entry-age')
+            expect(indicator.getAttribute('data-entry-age')).toBe('2h ago')
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('renders no age indicator when both timestamps are unusable', () => {
+        // The schema validator (`isEntry`) rejects rows with a
+        // non-finite `createdAt`, so the only realistic path to a
+        // missing-stamp entry is rendering an in-memory entry directly.
+        // We simulate that by writing a row with a sentinel `0`
+        // createdAt - the indicator returns null per its guard.
+        persistScratchlist(SID, [makeEntry({ id: 'no-stamp', text: 'note', createdAt: 0 })])
+        renderPanel()
+        expandPanel()
+        expect(screen.queryByTestId('scratchlist-entry-age')).toBeNull()
+    })
+})
+
+describe('ScratchlistDrawer disabled operations', () => {
+    it('disables and synchronously ignores move, delete, and promote actions while the parent send is pending', async () => {
+        const { ScratchlistDrawer } = await import('./ScratchlistPanel')
+        const entry = makeEntry({ id: 'pending-entry', text: 'held message' })
+        const onMove = vi.fn()
+        const onDelete = vi.fn()
+        const onPromoteToComposer = vi.fn()
+        const onPromoteToQueue = vi.fn(async () => true)
+
+        render(
+            <I18nProvider>
+                <ScratchlistDrawer
+                    entries={[entry]}
+                    sessionId={SID}
+                    api={{} as never}
+                    disabled
+                    onMove={onMove}
+                    onDelete={onDelete}
+                    onPromoteToComposer={onPromoteToComposer}
+                    onPromoteToQueue={onPromoteToQueue}
+                />
+            </I18nProvider>,
+        )
+
+        const mutationButtons = [
+            ...screen.getAllByRole('button', { name: 'Move entry up' }),
+            ...screen.getAllByRole('button', { name: 'Move entry down' }),
+            screen.getByRole('button', { name: 'Copy into composer' }),
+            screen.getByRole('button', { name: 'Send to queue' }),
+            screen.getByRole('button', { name: 'Delete entry' }),
+        ]
+        for (const button of mutationButtons) {
+            expect(button).toBeDisabled()
+            fireEvent.click(button)
+        }
+        // Copy is read-only and remains available while a chat send is pending.
+        expect(screen.getByRole('button', { name: 'Copy text to clipboard (not images)' })).not.toBeDisabled()
+
+        await Promise.resolve()
+        expect(onMove).not.toHaveBeenCalled()
+        expect(onDelete).not.toHaveBeenCalled()
+        expect(onPromoteToComposer).not.toHaveBeenCalled()
+        expect(onPromoteToQueue).not.toHaveBeenCalled()
     })
 })

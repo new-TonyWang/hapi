@@ -2,9 +2,13 @@ import { describe, expect, it } from 'bun:test'
 import type { Session } from './schemas'
 import {
     PENDING_REQUEST_SUMMARY_CAP,
+    computePendingRequestKinds,
+    computePendingRequestsCount,
+    computeTodoProgress,
     getPendingRequestKinds,
     getPendingRequests,
-    toSessionSummary
+    toSessionSummary,
+    toSessionSummaryMetadata
 } from './sessionSummary'
 
 function makeSession(overrides: Partial<Session> = {}): Session {
@@ -75,6 +79,63 @@ describe('toSessionSummary', () => {
             }
         }))
         expect(summary.metadata?.agentSessionId).toBe('grok-session-1')
+    })
+
+    it('uses the native id matching the current flavor instead of a stale id', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor: 'cursor',
+                codexSessionId: 'stale-codex-id',
+                cursorSessionId: 'cursor-session-1'
+            }
+        }))
+
+        expect(summary.metadata?.agentSessionId).toBe('cursor-session-1')
+    })
+
+    it('does not fall back to a stale cross-agent id for a known flavor', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor: 'pi',
+                codexSessionId: 'stale-codex-id'
+            }
+        }))
+
+        expect(summary.metadata?.agentSessionId).toBeUndefined()
+    })
+
+    it('includes piSessionId as the native resume token', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor: 'pi',
+                piSessionId: 'pi-session-1'
+            }
+        }))
+
+        expect(summary.metadata?.agentSessionId).toBe('pi-session-1')
+    })
+
+    it.each([
+        undefined,
+        'custom',
+        ' PI '
+    ])('does not infer a Pi identity for an unknown flavor: %s', (flavor) => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor,
+                piSessionId: 'pi-session-1'
+            }
+        }))
+
+        expect(summary.metadata?.agentSessionId).toBeUndefined()
     })
 
     it('includes pending request kinds and background task count', () => {
@@ -213,5 +274,54 @@ describe('getPendingRequestKinds', () => {
 
         const kinds = getPendingRequestKinds(makeSession({ agentState: { requests } }))
         expect(kinds).toEqual(['permission', 'input'])
+    })
+})
+
+// The SSE patch path (useSSE.ts patchSessionSummary) calls these directly
+// against the patch payload — no full Session needed — to keep the session
+// list summary consistent with structured todos/teamState/metadata/agentState
+// patches landing for the second half of #884.
+describe('summary derivation helpers', () => {
+    it('computeTodoProgress returns null for empty / undefined todos', () => {
+        expect(computeTodoProgress(undefined)).toBeNull()
+        expect(computeTodoProgress([])).toBeNull()
+    })
+
+    it('computeTodoProgress counts completed vs total', () => {
+        const progress = computeTodoProgress([
+            { content: 'a', status: 'pending', priority: 'medium', id: '1' },
+            { content: 'b', status: 'completed', priority: 'medium', id: '2' },
+            { content: 'c', status: 'completed', priority: 'medium', id: '3' }
+        ])
+        expect(progress).toEqual({ completed: 2, total: 3 })
+    })
+
+    it('computePendingRequestKinds works on a bare AgentState without a Session', () => {
+        const kinds = computePendingRequestKinds({
+            requests: {
+                req1: { tool: 'Bash', arguments: {} },
+                req2: { tool: 'AskUserQuestion', arguments: {} }
+            }
+        })
+        expect(kinds).toEqual(['permission', 'input'])
+    })
+
+    it('computePendingRequestsCount handles null agentState', () => {
+        expect(computePendingRequestsCount(null)).toBe(0)
+        expect(computePendingRequestsCount(undefined)).toBe(0)
+    })
+
+    it('toSessionSummaryMetadata returns null for null metadata', () => {
+        expect(toSessionSummaryMetadata(null)).toBeNull()
+        expect(toSessionSummaryMetadata(undefined)).toBeNull()
+    })
+
+    it('toSessionSummaryMetadata derives agentSessionId from the first non-null source id', () => {
+        const summary = toSessionSummaryMetadata({
+            path: '/p',
+            host: 'h',
+            cursorSessionId: 'cursor-xyz'
+        })
+        expect(summary?.agentSessionId).toBe('cursor-xyz')
     })
 })

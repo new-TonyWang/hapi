@@ -1,22 +1,61 @@
 import { describe, expect, it } from 'vitest'
-import { GEMINI_PERMISSION_MODES, OPENCODE_PERMISSION_MODES } from '@hapi/protocol/modes'
+import { AGY_PERMISSION_MODES, GEMINI_PERMISSION_MODES, OPENCODE_PERMISSION_MODES } from '@hapi/protocol/modes'
 import { parseRemoteAgentCommandOptions } from './agentCommandOptions'
 
 describe('parseRemoteAgentCommandOptions', () => {
+    it('maps --yolo to the flavor\'s own auto-approve mode, not a hardcoded "yolo"', () => {
+        // agy renamed its auto-approve mode to 'always-proceed'; 'yolo' is not a
+        // valid agy mode, so --yolo must resolve to the flavor's equivalent.
+        expect(parseRemoteAgentCommandOptions(['--yolo'], AGY_PERMISSION_MODES).permissionMode)
+            .toBe('always-proceed')
+        // Flavors that DO have a 'yolo' mode keep it.
+        expect(parseRemoteAgentCommandOptions(['--yolo'], OPENCODE_PERMISSION_MODES).permissionMode)
+            .toBe('yolo')
+    })
+
+    it('parses --hapi-session-id into existingSessionId (pty reopen id reuse)', () => {
+        // The runner emits --hapi-session-id when reopening a pty session so the
+        // child reuses the existing hub row. agy (this shared parser) must consume
+        // it — else the flag is silently dropped and reopen mints a new id + 404.
+        expect(parseRemoteAgentCommandOptions(['--hapi-session-id', 'hub-id-1'], AGY_PERMISSION_MODES).existingSessionId)
+            .toBe('hub-id-1')
+    })
+
     it('parses common remote agent flags', () => {
         expect(parseRemoteAgentCommandOptions([
             '--started-by', 'runner',
             '--hapi-starting-mode', 'remote',
+            '--existing-session-id', 'hapi-session-1',
             '--permission-mode', 'yolo',
             '--resume', 'session-1',
             '--model', 'model-a'
         ], GEMINI_PERMISSION_MODES)).toEqual({
             startedBy: 'runner',
             startingMode: 'remote',
+            existingSessionId: 'hapi-session-1',
             permissionMode: 'yolo',
             resumeSessionId: 'session-1',
             model: 'model-a'
         })
+    })
+
+    it('accepts pty as the agy runner starting mode', () => {
+        expect(parseRemoteAgentCommandOptions([
+            '--started-by', 'runner',
+            '--hapi-starting-mode', 'pty',
+        ], AGY_PERMISSION_MODES, ['local', 'remote', 'pty'])).toMatchObject({
+            startedBy: 'runner',
+            startingMode: 'pty',
+        })
+    })
+
+    it('parses --existing-session-id and rejects a missing value', () => {
+        expect(parseRemoteAgentCommandOptions([
+            '--existing-session-id', 'preallocated-hapi-id'
+        ], OPENCODE_PERMISSION_MODES).existingSessionId).toBe('preallocated-hapi-id')
+        expect(() => parseRemoteAgentCommandOptions([
+            '--existing-session-id'
+        ], OPENCODE_PERMISSION_MODES)).toThrow('Missing --existing-session-id value')
     })
 
     it('does not let --yolo override an explicit permission mode that appeared first', () => {
@@ -67,6 +106,7 @@ describe('parseRemoteAgentCommandOptions', () => {
         expect(() => parseRemoteAgentCommandOptions(['--resume'], OPENCODE_PERMISSION_MODES)).toThrow('Missing --resume value')
         expect(() => parseRemoteAgentCommandOptions(['--model'], OPENCODE_PERMISSION_MODES)).toThrow('Missing --model value')
         expect(() => parseRemoteAgentCommandOptions(['--model-reasoning-effort'], OPENCODE_PERMISSION_MODES)).toThrow('Missing --model-reasoning-effort value')
+        expect(() => parseRemoteAgentCommandOptions(['--existing-session-id'], OPENCODE_PERMISSION_MODES)).toThrow('Missing --existing-session-id value')
     })
 
     it('accepts OpenCode-native -s / --session as resume aliases', () => {
@@ -190,6 +230,7 @@ describe('parseRemoteAgentCommandOptions — pi flavor', () => {
                 '--hapi-starting-mode', 'remote',
                 '--model', 'claude-sonnet-4-5',
                 '--session-id', 'pi-sess-full',
+                '--existing-session-id', 'hapi-session-pi-full',
             ],
             ALLOWED
         )
@@ -198,6 +239,7 @@ describe('parseRemoteAgentCommandOptions — pi flavor', () => {
             startingMode: 'remote',
             model: 'claude-sonnet-4-5',
             resumeSessionId: 'pi-sess-full',
+            existingSessionId: 'hapi-session-pi-full',
         })
     })
 })

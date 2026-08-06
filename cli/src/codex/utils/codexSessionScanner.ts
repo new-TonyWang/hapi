@@ -5,12 +5,13 @@ import type { CodexSessionEvent } from './codexEventConverter';
 
 interface CodexSessionScannerOptions {
     transcriptPath: string | null;
-    onEvent: (event: CodexSessionEvent) => void;
+    onEvent: (event: CodexSessionEvent, context: { replayedHistory: boolean }) => void;
     onSessionId?: (sessionId: string) => void;
     replayExistingHistory?: boolean;
 }
 
 export interface CodexSessionScanner {
+    flush: () => Promise<void>;
     cleanup: () => Promise<void>;
     setTranscriptPath: (transcriptPath: string) => Promise<void>;
 }
@@ -20,6 +21,9 @@ export async function createCodexSessionScanner(opts: CodexSessionScannerOptions
     await scanner.start();
 
     return {
+        flush: async () => {
+            await scanner.flush();
+        },
         cleanup: async () => {
             await scanner.cleanup();
         },
@@ -31,7 +35,7 @@ export async function createCodexSessionScanner(opts: CodexSessionScannerOptions
 
 class CodexSessionScannerImpl extends BaseSessionScanner<CodexSessionEvent> {
     private transcriptPath: string | null;
-    private readonly onEvent: (event: CodexSessionEvent) => void;
+    private readonly onEvent: (event: CodexSessionEvent, context: { replayedHistory: boolean }) => void;
     private readonly onSessionId?: (sessionId: string) => void;
     private readonly fileEpochByPath = new Map<string, number>();
     private readonly fileStateByPath = new Map<string, {
@@ -41,6 +45,7 @@ class CodexSessionScannerImpl extends BaseSessionScanner<CodexSessionEvent> {
         nextLineIndex: number;
     }>();
     private replayExistingHistoryOnNextAttach: boolean;
+    private replayingExistingHistory = false;
     private observedSessionId: string | null = null;
 
     constructor(opts: CodexSessionScannerOptions) {
@@ -88,8 +93,13 @@ class CodexSessionScannerImpl extends BaseSessionScanner<CodexSessionEvent> {
     }
 
     protected async handleFileScan(stats: SessionFileScanStats<CodexSessionEvent>): Promise<void> {
-        for (const event of stats.events) {
-            this.onEvent(event);
+        const replayedHistory = this.replayingExistingHistory;
+        try {
+            for (const event of stats.events) {
+                this.onEvent(event, { replayedHistory });
+            }
+        } finally {
+            this.replayingExistingHistory = false;
         }
         if (stats.newCount > 0) {
             logger.debug(`[codex-session-scanner] ${stats.newCount} new events from ${stats.filePath}`);
@@ -102,9 +112,11 @@ class CodexSessionScannerImpl extends BaseSessionScanner<CodexSessionEvent> {
             // 中文注释：导入既有 Codex thread 时，首次挂接 transcript 不能先 prime 到 EOF，
             // 否则 Hapi 只会看到后续增量，客户端里已经存在的最新消息会被跳过。
             this.replayExistingHistoryOnNextAttach = false;
+            this.replayingExistingHistory = true;
             return;
         }
 
+        this.replayingExistingHistory = false;
         await this.primeTranscript(filePath);
     }
 

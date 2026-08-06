@@ -1,6 +1,8 @@
 import {
+    MACHINE_DISPLAY_NAME_MAX_LENGTH,
     MachineListDirectoryRequestSchema,
     MachinePathsExistsRequestSchema,
+    RenameMachineRequestSchema,
     SpawnSessionRequestSchema
 } from '@hapi/protocol'
 import { Hono } from 'hono'
@@ -22,6 +24,44 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         return c.json({ machines })
     })
 
+    app.patch('/machines/:id', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) {
+            return machine
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = RenameMachineRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body: displayName is required' }, 400)
+        }
+
+        // Trim first: a name is stored trimmed, so the ceiling applies to what
+        // actually gets stored. An empty result clears the custom name.
+        const displayName = parsed.data.displayName.trim()
+        if (displayName.length > MACHINE_DISPLAY_NAME_MAX_LENGTH) {
+            return c.json({ error: `displayName must be at most ${MACHINE_DISPLAY_NAME_MAX_LENGTH} characters` }, 400)
+        }
+
+        try {
+            await engine.renameMachine(machineId, displayName)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to rename machine'
+            // Match the session rename contract: contention maps to 409.
+            if (message.includes('concurrently') || message.includes('version')) {
+                return c.json({ error: message }, 409)
+            }
+            return c.json({ error: message }, 500)
+        }
+    })
+
     app.post('/machines/:id/spawn', async (c) => {
         const engine = getSyncEngine()
         if (!engine) {
@@ -39,6 +79,12 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         if (!parsed.success) {
             return c.json({ error: 'Invalid body' }, 400)
         }
+        if (parsed.data.agent === 'agy' && parsed.data.startingMode === 'remote') {
+            return c.json({ error: 'AGY only supports PTY mode' }, 400)
+        }
+        const startingMode = parsed.data.agent === 'agy'
+            ? 'pty'
+            : parsed.data.startingMode
 
         const result = await engine.spawnSession(
             machineId,
@@ -51,9 +97,14 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.yolo,
             parsed.data.sessionType,
             parsed.data.worktreeName,
-            undefined,
+            undefined, // resumeSessionId
             parsed.data.effort,
-            parsed.data.permissionMode
+            parsed.data.permissionMode,
+            parsed.data.serviceTier,
+            undefined,
+            parsed.data.collaborationMode,
+            parsed.data.copilotAgentMode,
+            startingMode
         )
         return c.json(result)
     })
@@ -77,7 +128,7 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
 
         try {
-            const result = await engine.listMachineDirectory(machineId, parsed.data.path)
+            const result = await engine.listMachineDirectory(machineId, parsed.data.path, parsed.data.includeHidden)
             return c.json(result)
         } catch (error) {
             return c.json({ error: error instanceof Error ? error.message : 'Failed to list directory' }, 500)
@@ -112,6 +163,29 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({ exists })
         } catch (error) {
             return c.json({ error: error instanceof Error ? error.message : 'Failed to check paths' }, 500)
+        }
+    })
+
+    app.get('/machines/:id/agy-models', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) {
+            return machine
+        }
+
+        try {
+            const result = await engine.listAgyModelsForMachine(machineId)
+            return c.json(result)
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list Agy models'
+            }, 500)
         }
     })
 
@@ -187,6 +261,31 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list Grok models'
+            }, 500)
+        }
+    })
+
+    app.get('/machines/:id/copilot-models', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) return machine
+
+        const cwd = (c.req.query('cwd') ?? '').trim()
+        if (!cwd) {
+            return c.json({ success: false, error: 'cwd query parameter is required' }, 400)
+        }
+
+        try {
+            return c.json(await engine.listCopilotModelsForCwd(machineId, cwd))
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list Copilot models'
             }, 500)
         }
     })

@@ -1,4 +1,6 @@
 import {
+    AGY_MODEL_LABELS,
+    AGY_MODEL_PRESETS,
     CLAUDE_EFFORT_LABELS,
     CLAUDE_EFFORT_LEVELS,
     CLAUDE_MODEL_LABELS,
@@ -15,6 +17,7 @@ export type CodexReasoningEffort = string
 // Grok reports effort values dynamically through ACP, while Claude uses the
 // fixed ClaudeEffortLevel catalog.
 export type LaunchEffort = string
+export type NewSessionServiceTier = 'standard' | 'fast'
 
 function modelPresetOptions<TModel extends string>(
     presets: readonly TModel[],
@@ -24,6 +27,10 @@ function modelPresetOptions<TModel extends string>(
 }
 
 export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]> = {
+    agy: [
+        { value: 'auto', label: 'Default' },
+        ...modelPresetOptions(AGY_MODEL_PRESETS, AGY_MODEL_LABELS),
+    ],
     claude: [
         { value: 'auto', label: 'Default' },
         ...modelPresetOptions(CLAUDE_MODEL_PRESETS, CLAUDE_MODEL_LABELS),
@@ -34,6 +41,9 @@ export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]
     cursor: [],
     kimi: [
         { value: 'auto', label: 'Default' },
+    ],
+    copilot: [
+        { value: 'auto', label: 'Auto' },
     ],
     gemini: [
         { value: 'auto', label: 'Default' },

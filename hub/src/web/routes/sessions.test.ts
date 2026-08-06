@@ -64,6 +64,8 @@ function createApp(session: Session, opts?: {
     sessionExists?: boolean
     archiveSession?: (sessionId: string) => Promise<void>
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
+    forkConversation?: SyncEngine['forkConversation']
+    rewindConversation?: SyncEngine['rewindConversation']
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
@@ -137,16 +139,19 @@ function createApp(session: Session, opts?: {
         getSessionExport: opts?.getSessionExport ?? (() => ({
             type: 'success',
             payload: {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 exportedAt: 1_762_000_000_000,
                 session,
-                messages: []
+                messages: [],
+                scratchlist: []
             }
         })),
         listSlashCommands: opts?.listSlashCommands ?? (async () => ({
             success: true,
             commands: []
-        }))
+        })),
+        forkConversation: opts?.forkConversation ?? (async () => ({ type: 'success', sessionId: 'child-1' })),
+        rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' }))
     } as Partial<SyncEngine>
 
     const app = new Hono<WebAppEnv>()
@@ -191,10 +196,11 @@ describe('sessions routes', () => {
 
         expect(response.status).toBe(200)
         expect(await response.json()).toEqual({
-            schemaVersion: 1,
+            schemaVersion: 2,
             exportedAt: 1_762_000_000_000,
             session,
-            messages: []
+            messages: [],
+            scratchlist: []
         })
     })
 
@@ -224,10 +230,11 @@ describe('sessions routes', () => {
             getSessionExport: () => ({
                 type: 'success',
                 payload: {
-                    schemaVersion: 1,
+                    schemaVersion: 2,
                     exportedAt: 1_762_000_000_000,
                     session,
-                    messages
+                    messages,
+                    scratchlist: []
                 }
             })
         })
@@ -1268,6 +1275,134 @@ describe('sessions routes', () => {
             expect(await response.json()).toEqual({ ok: true })
             expect(calls).toEqual(['session-1'])
         })
+    })
+
+    it('forks via POST /sessions/:id/fork and returns the child session id', async () => {
+        const calls: Array<{ sessionId: string; namespace: string; messageLocalId?: string }> = []
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                capabilities: { conversationHistory: { forkCurrent: true } }
+            }
+        })
+        const { app } = createApp(session, {
+            forkConversation: async (sessionId, namespace, messageLocalId) => {
+                calls.push({ sessionId, namespace, messageLocalId })
+                return { type: 'success', sessionId: 'forked-child' }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/fork', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ sessionId: 'forked-child' })
+        expect(calls).toEqual([{ sessionId: 'session-1', namespace: 'default', messageLocalId: undefined }])
+    })
+
+    it('rewinds via POST /sessions/:id/rewind', async () => {
+        const calls: Array<{ sessionId: string; messageLocalId: string }> = []
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                capabilities: { conversationHistory: { rewindToMessage: true } }
+            }
+        })
+        const { app } = createApp(session, {
+            rewindConversation: async (sessionId, _namespace, messageLocalId) => {
+                calls.push({ sessionId, messageLocalId })
+                return { type: 'success' }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/rewind', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ messageLocalId: 'local-2' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ success: true })
+        expect(calls).toEqual([{ sessionId: 'session-1', messageLocalId: 'local-2' }])
+    })
+
+    it('rejects rewind without messageLocalId', async () => {
+        const { app } = createApp(createSession())
+        const response = await app.request('/api/sessions/session-1/rewind', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+        expect(response.status).toBe(400)
+    })
+
+    it('honors optional limit on GET /sessions after sort', async () => {
+        const sessions = [
+            createSession({ id: 'older-active', active: true, updatedAt: 10 }),
+            createSession({ id: 'newer-active', active: true, updatedAt: 20 }),
+            createSession({ id: 'inactive', active: false, updatedAt: 30 })
+        ]
+        const scheduledIds: string[][] = []
+        const engine = {
+            getSessionsByNamespace: () => sessions,
+            getFutureScheduledMessageCounts: (ids: string[]) => {
+                scheduledIds.push(ids)
+                return new Map(ids.map((id) => [id, 0]))
+            },
+            getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
+        } as unknown as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
+
+        const limited = await app.request('/api/sessions?limit=2')
+        expect(limited.status).toBe(200)
+        const limitedBody = await limited.json() as { sessions: Array<{ id: string }> }
+        expect(limitedBody.sessions.map((s) => s.id)).toEqual(['newer-active', 'older-active'])
+        expect(scheduledIds.at(-1)).toEqual(['newer-active', 'older-active'])
+
+        const unlimited = await app.request('/api/sessions')
+        expect(unlimited.status).toBe(200)
+        const unlimitedBody = await unlimited.json() as { sessions: Array<{ id: string }> }
+        expect(unlimitedBody.sessions).toHaveLength(3)
+    })
+
+    it('order=updatedAt truncates newest-first including inactive peers', async () => {
+        const sessions = [
+            createSession({ id: 'old-active', active: true, updatedAt: 10 }),
+            createSession({ id: 'new-inactive', active: false, updatedAt: 50 }),
+            createSession({ id: 'mid-active', active: true, updatedAt: 20 })
+        ]
+        const engine = {
+            getSessionsByNamespace: () => sessions,
+            getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
+        } as unknown as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/sessions?limit=1&order=updatedAt')
+        expect(response.status).toBe(200)
+        const body = await response.json() as { sessions: Array<{ id: string }> }
+        expect(body.sessions.map((s) => s.id)).toEqual(['new-inactive'])
     })
 
 })

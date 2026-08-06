@@ -196,10 +196,8 @@ export function ToolGroupCard(props: {
     const [selectedToolId, setSelectedToolId] = useState<string | null>(null)
     const [isHydratingHistory, setIsHydratingHistory] = useState(false)
     const [historyExhausted, setHistoryExhausted] = useState(false)
-    const [retryNonce, setRetryNonce] = useState(0)
     const [now, setNow] = useState(() => Date.now())
     const hydrationRunRef = useRef(0)
-    const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const groupTiming = getToolGroupTiming(props.block.tools, now)
 
     useEffect(() => {
@@ -209,16 +207,7 @@ export function ToolGroupCard(props: {
         return () => clearInterval(id)
     }, [groupTiming.running, groupTiming.startedAt])
 
-    function clearRetryTimer() {
-        if (retryTimerRef.current === null) {
-            return
-        }
-        clearTimeout(retryTimerRef.current)
-        retryTimerRef.current = null
-    }
-
     useEffect(() => {
-        clearRetryTimer()
         hydrationRunRef.current += 1
         setOpen(props.block.defaultOpen)
         setSelectedToolId(null)
@@ -227,21 +216,13 @@ export function ToolGroupCard(props: {
     }, [props.block.id, props.block.defaultOpen])
 
     useEffect(() => {
-        return () => {
-            clearRetryTimer()
-        }
-    }, [])
-
-    useEffect(() => {
         if (!open) {
-            clearRetryTimer()
             hydrationRunRef.current += 1
             setIsHydratingHistory(false)
             setHistoryExhausted(false)
             return
         }
         if (!props.block.needsOlderHistory) {
-            clearRetryTimer()
             hydrationRunRef.current += 1
             setIsHydratingHistory(false)
             setHistoryExhausted(false)
@@ -250,7 +231,7 @@ export function ToolGroupCard(props: {
         if (isHydratingHistory || historyExhausted) {
             return
         }
-        if (ctx.isLoadingMoreMessages) {
+        if (ctx.isSyncingTail || ctx.isLoadingMoreMessages) {
             return
         }
         if (!ctx.hasMoreMessages) {
@@ -265,25 +246,15 @@ export function ToolGroupCard(props: {
         setHistoryExhausted(false)
         setIsHydratingHistory(true)
         void ctx.loadOlderMessagesPreservingScroll()
-            .then((loaded) => {
+            .then((result) => {
                 if (hydrationRunRef.current !== runId) return
                 setIsHydratingHistory(false)
-                if (!loaded) {
-                    if (!ctx.hasMoreMessages) {
-                        setHistoryExhausted(true)
-                        return
-                    }
-                    clearRetryTimer()
-                    retryTimerRef.current = setTimeout(() => {
-                        retryTimerRef.current = null
-                        if (hydrationRunRef.current !== runId) return
-                        setRetryNonce((value) => value + 1)
-                    }, 150)
+                if (result === 'terminal-stop') {
+                    setHistoryExhausted(true)
                 }
             })
             .catch(() => {
                 if (hydrationRunRef.current !== runId) return
-                clearRetryTimer()
                 setIsHydratingHistory(false)
                 setHistoryExhausted(true)
             })
@@ -291,11 +262,11 @@ export function ToolGroupCard(props: {
         open,
         props.block.needsOlderHistory,
         ctx.hasMoreMessages,
+        ctx.isSyncingTail,
         ctx.isLoadingMoreMessages,
         ctx.loadOlderMessagesPreservingScroll,
         historyExhausted,
         isHydratingHistory,
-        retryNonce,
     ])
 
     const selectedTool = useMemo(
@@ -440,10 +411,10 @@ export function ToolGroupCard(props: {
                     setSelectedToolId(null)
                 }
             }}>
-                <DialogContent className="max-w-2xl" aria-describedby={undefined}>
+                <DialogContent className="max-w-2xl" closeButtonClassName="top-2" aria-describedby={undefined}>
                     {selectedTool && selectedPresentation ? (
                         <>
-                            <DialogHeader>
+                            <DialogHeader className="text-left">
                                 <DialogTitle>{selectedPresentation.title}</DialogTitle>
                             </DialogHeader>
                             <ToolDetailDialogContent block={selectedTool} metadata={props.metadata} />

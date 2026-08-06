@@ -28,6 +28,7 @@ export type AgentSessionBaseOptions<Mode> = {
     effort?: SessionEffort;
     serviceTier?: string | null;
     collaborationMode?: SessionCollaborationMode;
+    acknowledgeMessagesOnDequeue?: boolean;
 };
 
 export class AgentSessionBase<Mode> {
@@ -73,7 +74,9 @@ export class AgentSessionBase<Mode> {
         this.serviceTier = opts.serviceTier;
         this.collaborationMode = opts.collaborationMode;
 
-        this.queue.onBatchConsumed = (localIds) => this.client.emitMessagesConsumed(localIds);
+        this.queue.onBatchConsumed = opts.acknowledgeMessagesOnDequeue === false
+            ? null
+            : (localIds) => this.client.emitMessagesConsumed(localIds);
 
         this.client.keepAlive(this.thinking, this.mode, this.getKeepAliveRuntime());
         this.keepAliveInterval = setInterval(() => {
@@ -132,6 +135,21 @@ export class AgentSessionBase<Mode> {
             clearInterval(this.keepAliveInterval);
             this.keepAliveInterval = null;
         }
+    };
+
+    private _killHandler: (() => void) | null = null;
+
+    // Graceful-shutdown hook shared by all flavors. The active launcher
+    // registers a teardown handler (e.g. abort the PTY) via setKillHandler; the
+    // runner lifecycle's onBeforeClose calls kill() before process.exit so the
+    // resource is released through the normal finally path rather than relying on
+    // last-resort reapers. No-op when no handler is registered (e.g. local mode).
+    setKillHandler = (handler: () => void): void => {
+        this._killHandler = handler;
+    };
+
+    kill = (): void => {
+        this._killHandler?.();
     };
 
     protected getKeepAliveRuntime():

@@ -6,22 +6,32 @@ export type TerminalEventGuardInput = {
     eventThreadId?: string | null;
     currentThreadId?: string | null;
     allowMatchingThreadIdTerminalEvent?: boolean;
+    allowMismatchedTurnIdTerminalEvent?: boolean;
 };
 
 export function shouldIgnoreTerminalEvent(input: TerminalEventGuardInput): boolean {
     const allowAnonymousTerminalEvent = input.allowAnonymousTerminalEvent === true;
+    const allowMatchingThreadIdTerminalEvent = input.allowMatchingThreadIdTerminalEvent === true;
+    const hasMatchingThreadId = Boolean(
+        input.eventThreadId &&
+        input.currentThreadId &&
+        input.eventThreadId === input.currentThreadId
+    );
 
     if (input.eventTurnId) {
-        return Boolean(input.currentTurnId && input.eventTurnId !== input.currentTurnId);
+        if (!input.currentTurnId || input.eventTurnId === input.currentTurnId) {
+            return false;
+        }
+        return !(
+            input.allowMismatchedTurnIdTerminalEvent === true
+            && hasMatchingThreadId
+        );
     }
 
     if (input.currentTurnId) {
-        const allowMatchingThreadIdTerminalEvent = input.allowMatchingThreadIdTerminalEvent === true;
         if (
             allowMatchingThreadIdTerminalEvent &&
-            input.eventThreadId &&
-            input.currentThreadId &&
-            input.eventThreadId === input.currentThreadId
+            hasMatchingThreadId
         ) {
             return false;
         }

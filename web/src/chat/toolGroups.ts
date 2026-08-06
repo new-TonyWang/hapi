@@ -38,9 +38,24 @@ export type ToolGroupBlock = {
 
 export type VisibleChatBlock = ChatBlock | ToolGroupBlock
 
+export type VisibleChatBlockRole = 'user' | 'assistant' | 'system'
+
+/**
+ * The role a block renders under in the thread. `@assistant-ui/react` joins
+ * adjacent assistant-role blocks into a single card, so this also determines
+ * how many rows a run of blocks actually produces on screen.
+ */
+export function visibleBlockRole(block: VisibleChatBlock): VisibleChatBlockRole {
+    if (block.kind === 'user-text') return 'user'
+    if (block.kind === 'agent-event') return 'system'
+    if (block.kind === 'cli-output') return block.source === 'user' ? 'user' : 'assistant'
+    return 'assistant'
+}
+
 type ToolGroupingOptions = {
     hasMoreMessages: boolean
     previousGroups?: ToolGroupBlock[]
+    codexExplorationCollapsed?: boolean
 }
 
 const PLAN_TOOL_NAMES = new Set([
@@ -58,6 +73,9 @@ const MILESTONE_TOOL_NAMES = new Set([
     'TeamCreate',
     'TeamDelete',
     'SendMessage',
+    // agy's transitional task-log chip — keep it standalone (like SendMessage)
+    // so it reads as a thin marker instead of being folded into a tool group.
+    'AgyTaskLog',
     'Skill',
     'spawn_agent',
     'send_input',
@@ -97,7 +115,7 @@ export function getToolGroupActionKind(block: ToolCallBlock): ToolGroupActionKin
 
     if (name === 'Read' || name === 'NotebookRead') return 'read'
     if (name === 'Grep' || name === 'Glob' || name === 'LS') return 'search'
-    if (name === 'Bash' || name === 'CodexBash' || name === 'shell_command') return 'command'
+    if (name === 'Bash' || name === 'CodexBash' || name === 'shell_command' || name === 'run_shell_command') return 'command'
     if (name === 'Edit' || name === 'MultiEdit' || name === 'Write' || name === 'NotebookEdit' || name === 'CodexPatch' || name === 'CodexDiff') {
         return 'mutation'
     }
@@ -291,7 +309,7 @@ export function buildVisibleChatBlocks(
             firstToolId: tools[0].id,
             lastToolId: tools[tools.length - 1].id,
             tools,
-            defaultOpen: groupingFamily === 'codex-exploration',
+            defaultOpen: groupingFamily === 'codex-exploration' && options.codexExplorationCollapsed === false,
             historyState: needsOlderHistory ? 'needs-older-history' : 'complete',
             needsOlderHistory,
             activityTitle,

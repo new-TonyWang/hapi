@@ -17,6 +17,13 @@ export interface SDKMessage {
 export interface SDKUserMessage extends SDKMessage {
     type: 'user'
     parent_tool_use_id?: string
+    /**
+     * Set by Claude Code on user-role messages it injects itself (skill bodies,
+     * compact continuation summaries) rather than relaying from the human. The
+     * on-disk transcript spells the same thing `isMeta`.
+     */
+    isSynthetic?: boolean
+    isMeta?: boolean
     message: {
         role: 'user'
         content: string | Array<{
@@ -52,6 +59,7 @@ export interface SDKSystemMessage extends SDKMessage {
     model?: string
     cwd?: string
     tools?: string[]
+    skills?: string[]
     slash_commands?: string[]
     /**
      * Present on `subtype: 'status'` messages that report a /compact outcome.
@@ -174,6 +182,7 @@ export interface CanCallToolCallback {
  */
 export interface QueryOptions {
     abort?: AbortSignal
+    additionalArgs?: string[]
     additionalDirectories?: string[]
     allowedTools?: string[]
     appendSystemPrompt?: string
@@ -186,6 +195,11 @@ export interface QueryOptions {
     permissionMode?: ClaudePermissionMode
     continue?: boolean
     resume?: string
+    /**
+     * When resuming, branch with `--fork-session` instead of taking over the
+     * existing Claude session id.
+     */
+    forkSession?: boolean
     model?: string
     effort?: string
     fallbackModel?: string

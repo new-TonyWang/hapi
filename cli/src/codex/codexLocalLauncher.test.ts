@@ -80,6 +80,9 @@ function createSessionStub(
     let localLaunchFailure: { message: string; exitReason: 'switch' | 'exit' } | null = null;
     let sessionId: string | null = null;
     let transcriptPath: string | null = initialTranscriptPath;
+    let transcriptHistoryReplayPending = replayTranscriptHistoryOnStart;
+    let modelReasoningEffort: string | null = null;
+    const modelReasoningEffortUpdates: Array<string | null> = [];
     const transcriptPathCallbacks: Array<(path: string) => void> = [];
 
     return {
@@ -94,7 +97,10 @@ function createSessionStub(
             startedBy: 'terminal' as const,
             startingMode: 'local' as const,
             codexArgs,
-            replayTranscriptHistoryOnStart,
+            shouldReplayTranscriptHistory: () => transcriptHistoryReplayPending,
+            markTranscriptHistoryReplayConsumed: () => {
+                transcriptHistoryReplayPending = false;
+            },
             client: {
                 isPending: () => pendingClient,
                 rpcHandlerManager: {
@@ -102,7 +108,11 @@ function createSessionStub(
                 }
             },
             getPermissionMode: () => permissionMode,
-            getModelReasoningEffort: () => null,
+            getModelReasoningEffort: () => modelReasoningEffort,
+            setModelReasoningEffort: (effort: string | null) => {
+                modelReasoningEffort = effort;
+                modelReasoningEffortUpdates.push(effort);
+            },
             onSessionFound: (value: string) => {
                 sessionId = value;
             },
@@ -145,7 +155,9 @@ function createSessionStub(
         userMessages,
         agentMessages,
         getUserActivityCount: () => userActivityCount,
-        getLocalLaunchFailure: () => localLaunchFailure
+        getLocalLaunchFailure: () => localLaunchFailure,
+        getModelReasoningEffort: () => modelReasoningEffort,
+        getModelReasoningEffortUpdates: () => modelReasoningEffortUpdates
     };
 }
 
@@ -359,6 +371,48 @@ describe('codexLocalLauncher', () => {
             message: 'hello from transcript',
             id: expect.any(String)
         });
+    });
+
+    it('tracks local turn context and stamps its model on usage', async () => {
+        const transcriptPath = await writeTranscriptMeta('codex-turn-context.jsonl', 'codex-thread-effort');
+        const { session, agentMessages, getModelReasoningEffort, getModelReasoningEffortUpdates } = createSessionStub('default');
+        let releaseRunBarrier: (() => void) | undefined;
+        harness.runBarrier = new Promise((resolve) => {
+            releaseRunBarrier = resolve;
+        });
+
+        const launcherPromise = codexLocalLauncher(session as never);
+        await wait(50);
+        harness.sessionHookHandlers[0]?.('codex-thread-effort', {
+            transcript_path: transcriptPath
+        });
+        await wait(100);
+
+        await appendFile(transcriptPath, [
+            JSON.stringify({
+                type: 'turn_context',
+                payload: { effort: 'max' }
+            }),
+            JSON.stringify({
+                type: 'turn_context',
+                payload: { model: 'gpt-5.4' }
+            }),
+            JSON.stringify({
+                type: 'event_msg',
+                payload: { type: 'token_count', info: {} }
+            })
+        ].join('\n') + '\n');
+        await wait(700);
+
+        releaseRunBarrier?.();
+        await launcherPromise;
+
+        expect(getModelReasoningEffortUpdates()).toEqual(['max', null]);
+        expect(getModelReasoningEffort()).toBeNull();
+        expect(agentMessages).toContainEqual(expect.objectContaining({
+            type: 'token_count',
+            model: 'gpt-5.4'
+        }));
     });
 
     it('renders nested Code Mode plans and commands without their covered exec wrapper', async () => {
@@ -582,9 +636,9 @@ describe('codexLocalLauncher', () => {
         }
     });
 
-    it('replays existing transcript messages when importing a Codex thread into a new Hapi session', async () => {
+    it('replays imported transcript history only on the first local attachment', async () => {
         const transcriptPath = join(tempDir, 'codex-import-transcript.jsonl');
-        const { session, agentMessages } = createSessionStub('default', undefined, '/tmp/worktree', null, true);
+        const { session, userMessages, agentMessages } = createSessionStub('default', undefined, '/tmp/worktree', null, true);
         let releaseRunBarrier: (() => void) | undefined;
         harness.runBarrier = new Promise((resolve) => {
             releaseRunBarrier = resolve;
@@ -594,7 +648,15 @@ describe('codexLocalLauncher', () => {
             transcriptPath,
             [
                 JSON.stringify({ type: 'session_meta', payload: { id: 'codex-thread-import' } }),
-                JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'old imported message' } })
+                JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'old imported prompt' } }),
+                JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'old imported message' } }),
+                JSON.stringify({
+                    type: 'event_msg',
+                    payload: {
+                        type: 'token_count',
+                        info: { total_token_usage: { input_tokens: 100, output_tokens: 10 } }
+                    }
+                })
             ].join('\n') + '\n'
         );
 
@@ -606,15 +668,79 @@ describe('codexLocalLauncher', () => {
         });
         await wait(300);
 
+        await appendFile(
+            transcriptPath,
+            JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'tail before switch' } }) + '\n'
+        );
+
         if (releaseRunBarrier) {
             releaseRunBarrier();
         }
         await launcherPromise;
 
+        expect(userMessages).toEqual(['old imported prompt', 'tail before switch']);
+        expect(agentMessages.filter((message) => (
+            message as { message?: string }
+        ).message === 'old imported message')).toHaveLength(1);
+
+        let releaseSecondRunBarrier: (() => void) | undefined;
+        harness.runBarrier = new Promise((resolve) => {
+            releaseSecondRunBarrier = resolve;
+        });
+
+        const secondLauncherPromise = codexLocalLauncher(session as never);
+        await wait(50);
+
+        harness.sessionHookHandlers[1]?.('codex-thread-import', {
+            transcript_path: transcriptPath
+        });
+        await wait(300);
+
+        expect(userMessages).toEqual(['old imported prompt', 'tail before switch']);
+        expect(agentMessages.filter((message) => (
+            message as { message?: string }
+        ).message === 'old imported message')).toHaveLength(1);
+
+        await appendFile(
+            transcriptPath,
+            [
+                JSON.stringify({ type: 'event_msg', payload: { type: 'user_message', message: 'new local prompt' } }),
+                JSON.stringify({ type: 'event_msg', payload: { type: 'agent_message', message: 'new local response' } }),
+                JSON.stringify({
+                    type: 'event_msg',
+                    payload: {
+                        type: 'token_count',
+                        info: { total_token_usage: { input_tokens: 120, output_tokens: 12 } }
+                    }
+                })
+            ].join('\n') + '\n'
+        );
+        await wait(700);
+
+        if (releaseSecondRunBarrier) {
+            releaseSecondRunBarrier();
+        }
+        await secondLauncherPromise;
+
+        expect(userMessages).toEqual(['old imported prompt', 'tail before switch', 'new local prompt']);
+        expect(agentMessages.filter((message) => (
+            message as { message?: string }
+        ).message === 'old imported message')).toHaveLength(1);
         expect(agentMessages).toContainEqual({
             type: 'message',
-            message: 'old imported message',
+            message: 'new local response',
             id: expect.any(String)
+        });
+        const tokenMessages = agentMessages.filter((message) => (
+            message as { type?: string }
+        ).type === 'token_count') as Array<Record<string, unknown>>;
+        expect(tokenMessages).toHaveLength(2);
+        expect(tokenMessages[0]).toMatchObject({ hapiUsageScope: 'imported-history' });
+        expect(tokenMessages[0]).not.toHaveProperty('thread_id');
+        expect(tokenMessages[1]).toMatchObject({
+            threadId: 'codex-thread-import',
+            thread_id: 'codex-thread-import',
+            hapiUsageScope: 'managed'
         });
     });
 

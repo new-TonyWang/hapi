@@ -1,7 +1,8 @@
 import type { ClientToServerEvents } from '@hapi/protocol'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
-import type { CodexCollaborationMode, PermissionMode } from '@hapi/protocol/types'
+import type { CopilotAgentMode } from '@hapi/protocol'
+import type { AgentState, CodexCollaborationMode, Metadata, PermissionMode } from '@hapi/protocol/types'
 import { isRedundantGoalStatusEventContent } from '@hapi/protocol/messages'
 import type { Store, StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
@@ -24,6 +25,7 @@ type SessionAlivePayload = {
     effort?: string | null
     serviceTier?: string | null
     collaborationMode?: CodexCollaborationMode
+    copilotAgentMode?: CopilotAgentMode
 }
 
 type SessionEndPayload = {
@@ -47,7 +49,11 @@ type UpdateStateHandler = ClientToServerEvents['update-state']
 const messageSchema = z.object({
     sid: z.string(),
     message: z.union([z.string(), z.unknown()]),
-    localId: z.string().optional()
+    localId: z.string().optional(),
+    // Client-provided origin timestamp (epoch ms) — e.g. a Claude transcript
+    // entry's own `timestamp`. Only honored for agent messages (no localId);
+    // see addMessage in messages.ts.
+    createdAt: z.number().optional()
 })
 
 const updateMetadataSchema = z.object({
@@ -61,6 +67,21 @@ const updateStateSchema = z.object({
     expectedVersion: z.number().int(),
     agentState: z.unknown().nullable()
 })
+
+const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
+
+function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
+    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
+    const next = { ...(incoming as Record<string, unknown>) }
+    const existing = current && typeof current === 'object' && !Array.isArray(current)
+        ? current as Record<string, unknown>
+        : {}
+    for (const key of HUB_OWNED_METADATA_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(existing, key)) next[key] = existing[key]
+        else delete next[key]
+    }
+    return next
+}
 
 export type SessionHandlersDeps = {
     store: Store
@@ -88,7 +109,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const { sid, localId } = parsed.data
+        const { sid, localId, createdAt } = parsed.data
         const raw = parsed.data.message
 
         const content = typeof raw === 'string'
@@ -112,7 +133,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const msg = store.messages.addMessage(sid, content, localId)
+        const msg = store.messages.addMessage(sid, content, localId, undefined, createdAt)
         if (shouldRecordSessionActivity(content)) {
             onSessionActivity?.(sid, msg.createdAt)
         }
@@ -121,7 +142,18 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         if (todos) {
             const updated = store.sessions.setSessionTodos(sid, todos, msg.createdAt, session.namespace)
             if (updated) {
-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+                const stored = store.sessions.getSession(sid)
+                onWebappEvent?.({
+                    type: 'session-updated',
+                    sessionId: sid,
+                    data: {
+                        todos: {
+                            version: stored?.todosUpdatedAt ?? msg.createdAt,
+                            value: todos
+                        },
+                        updatedAt: stored?.updatedAt ?? msg.createdAt
+                    }
+                })
             }
         }
 
@@ -132,7 +164,21 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             const newTeamState = applyTeamStateDelta(existingTeamState ?? null, teamDelta)
             const updated = store.sessions.setSessionTeamState(sid, newTeamState, msg.createdAt, session.namespace)
             if (updated) {
-                onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+                const stored = store.sessions.getSession(sid)
+                // Versioned clear: value null = TeamDelete. Consumers gate on
+                // version (store team_state_updated_at) so dual SSE cannot
+                // resurrect a deleted team from a lagged older event.
+                onWebappEvent?.({
+                    type: 'session-updated',
+                    sessionId: sid,
+                    data: {
+                        teamState: {
+                            version: stored?.teamStateUpdatedAt ?? msg.createdAt,
+                            value: newTeamState
+                        },
+                        updatedAt: stored?.updatedAt ?? msg.createdAt
+                    }
+                })
             }
         }
 
@@ -189,7 +235,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
 
         const result = store.sessions.updateSessionMetadata(
             sid,
-            metadata,
+            preserveHubOwnedMetadata(metadata, sessionAccess.value.metadata),
             expectedVersion,
             sessionAccess.value.namespace
         )
@@ -202,6 +248,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
 
         if (result.result === 'success') {
+            const stored = store.sessions.getSession(sid)
             const update = {
                 id: randomUUID(),
                 seq: Date.now(),
@@ -220,7 +267,19 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 }
             }
             socket.to(`session:${sid}`).emit('update', update)
-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+            onWebappEvent?.({
+                type: 'session-updated',
+                sessionId: sid,
+                // The unknown-cast here mirrors the schema's MetadataSchema.nullable()
+                // shape: the store returns raw JSON, the wire schema parses it on
+                // both ends. Keeping the broadcast shape identical to the socket.io
+                // `update-session` body (line ~213) lets the same patch travel
+                // through both fan-out channels without divergence.
+                data: {
+                    metadata: { version: result.version, value: result.value as Metadata | null },
+                    updatedAt: stored?.updatedAt ?? Date.now()
+                }
+            })
         }
     }
 
@@ -255,6 +314,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
 
         if (result.result === 'success') {
+            const stored = store.sessions.getSession(sid)
             const update = {
                 id: randomUUID(),
                 seq: Date.now(),
@@ -267,7 +327,14 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 }
             }
             socket.to(`session:${sid}`).emit('update', update)
-            onWebappEvent?.({ type: 'session-updated', sessionId: sid })
+            onWebappEvent?.({
+                type: 'session-updated',
+                sessionId: sid,
+                data: {
+                    agentState: { version: result.version, value: agentState as AgentState | null },
+                    updatedAt: stored?.updatedAt ?? Date.now()
+                }
+            })
         }
     }
 
@@ -311,25 +378,37 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
         const invokedAt = Date.now()
+        let sessionUpdatedAt: number
         try {
-            store.messages.markMessagesInvoked(data.sid, localIds, invokedAt)
-            onSessionActivity?.(data.sid, invokedAt)
-            // Only drop the queued-thinking grace when the CLI explicitly opts in
-            // (synchronous handlers like slash commands that will never send
-            // their own `thinking=true` keepalive). Normal queue drains still
-            // need the grace so the spinner doesn't flicker between the queue
-            // shift and `backend.prompt` start.
-            if (data.clearQueuedThinkingGrace === true) {
-                onMessagesConsumed?.(data.sid)
-            }
-            // Emit only after the DB write succeeds. Otherwise a transient SQLite
-            // failure would broadcast an `invokedAt` that was never persisted —
-            // live clients would hide the queued rows while a refresh / secondary
-            // client would see them as queued again, diverging the state.
-            onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
+            sessionUpdatedAt = store.recordMessagesConsumed(
+                data.sid,
+                localIds,
+                invokedAt,
+                sessionAccess.value.namespace
+            )
         } catch (err) {
-            console.error('markMessagesInvoked failed', err)
+            console.error('recordMessagesConsumed failed', err)
+            return
         }
+
+        try {
+            onSessionActivity?.(data.sid, sessionUpdatedAt)
+        } catch (err) {
+            console.error('onSessionActivity failed', err)
+        }
+
+        // Only drop the queued-thinking grace when the CLI explicitly opts in
+        // (synchronous handlers like slash commands that will never send
+        // their own `thinking=true` keepalive). Normal queue drains still
+        // need the grace so the spinner doesn't flicker between the queue
+        // shift and `backend.prompt` start.
+        if (data.clearQueuedThinkingGrace === true) {
+            onMessagesConsumed?.(data.sid)
+        }
+        // Emit only after the DB transaction succeeds. This is an ACK-level
+        // batch contract, so preserve its original timestamp even when IDs are
+        // heterogeneous, replayed, or unknown.
+        onWebappEvent?.({ type: 'messages-consumed', sessionId: data.sid, localIds, invokedAt })
     })
 
     socket.on('session-end', (data: SessionEndPayload) => {
@@ -354,10 +433,12 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         // rows after the CLI exits — there is no longer an ack path, so they would
         // stay queued forever.  The 5-second tick in syncEngine.expireInactive
         // emits scheduled rows when they mature, regardless of session end.
-        try {
-            onSweepImmediateQueued?.(data.sid, Date.now())
-        } catch (err) {
-            console.error('session-end sweep failed', err)
+        if (data.reason !== 'cleared') {
+            try {
+                onSweepImmediateQueued?.(data.sid, Date.now())
+            } catch (err) {
+                console.error('session-end sweep failed', err)
+            }
         }
 
         onSessionEnd?.(data)

@@ -39,10 +39,19 @@ export function useSkills(
             if (!api || !sessionId) {
                 throw new Error('Session unavailable')
             }
-            return await api.getSkills(sessionId)
+            const response = await api.getSkills(sessionId)
+            if (!response.success) {
+                throw new Error(response.error ?? 'Failed to load skills')
+            }
+            return response
         },
         enabled: Boolean(api && sessionId),
-        staleTime: Infinity,
+        // Skills change only when the user edits files on the machine, so
+        // polling them on a timer just burns relay bandwidth on an answer
+        // that is almost always identical. getSuggestions() refetches when
+        // the user actually types "$", which is the moment freshness matters.
+        staleTime: 5 * 60_000,
+        refetchOnWindowFocus: true,
         gcTime: 30 * 60 * 1000,
         retry: false,
     })
@@ -55,6 +64,12 @@ export function useSkills(
     }, [query.data])
 
     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {
+        // Fire-and-forget for the same reason as useSlashCommands: the RPC can
+        // stall behind a wedged CLI, and the menu must not block on it.
+        if (queryText === '$') {
+            void query.refetch()
+        }
+        const currentSkills = skills
         const recent = getRecentSkills()
         const getRecency = (name: string) => recent[name] ?? 0
         const searchTerm = queryText.startsWith('$')
@@ -62,7 +77,7 @@ export function useSkills(
             : queryText.toLowerCase()
 
         if (!searchTerm) {
-            return [...skills]
+            return [...currentSkills]
                 .sort((a, b) => getRecency(b.name) - getRecency(a.name) || a.name.localeCompare(b.name))
                 .map((skill) => ({
                     key: `$${skill.name}`,
@@ -74,7 +89,7 @@ export function useSkills(
         }
 
         const maxDistance = Math.max(2, Math.floor(searchTerm.length / 2))
-        return skills
+        return currentSkills
             .map(skill => {
                 const name = skill.name.toLowerCase()
                 let score: number
@@ -96,7 +111,7 @@ export function useSkills(
                 description: skill.description,
                 source: 'builtin'
             }))
-    }, [skills])
+    }, [query.refetch, skills])
 
     return {
         skills,

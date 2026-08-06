@@ -10,13 +10,25 @@ import {
     unwrapRoleWrappedRecordEnvelope
 } from '@hapi/protocol/messages'
 import { isObject } from '@hapi/protocol'
-import type { QueuedStateResponse } from '@hapi/protocol/apiTypes'
+import type { MessageDeliveryMode, MessagesResponse, QueuedStateResponse } from '@hapi/protocol/apiTypes'
 import type { Server } from 'socket.io'
 import { randomUUID } from 'node:crypto'
 import type { Store, CancelQueuedMessageResult } from '../store'
 import { EventPublisher } from './eventPublisher'
 
 type StoredMessageForDelivery = ReturnType<Store['messages']['getMessages']>[number]
+type MessagePosition = { at: number; seq: number }
+
+function messagePosition(message: StoredMessageForDelivery): MessagePosition {
+    return {
+        at: message.invokedAt ?? message.createdAt,
+        seq: message.seq
+    }
+}
+
+function comparePosition(a: MessagePosition, b: MessagePosition): number {
+    return a.at !== b.at ? a.at - b.at : a.seq - b.seq
+}
 
 function isWebVisibleStoredMessage(message: StoredMessageForDelivery): boolean {
     return !isRedundantGoalStatusEventContent(message.content)
@@ -67,6 +79,39 @@ function isExportVisibleStoredMessage(message: StoredMessageForDelivery): boolea
     }
 
     return isClaudeChatVisibleMessage({ type: data.type, subtype: data.subtype })
+}
+
+function getNormalizedDeliveryMode(
+    metadata: unknown,
+    requestedDeliveryMode: MessageDeliveryMode | undefined,
+    scheduledAt: number | null | undefined
+): MessageDeliveryMode {
+    if (requestedDeliveryMode !== 'steer' || scheduledAt != null) {
+        return 'queue'
+    }
+
+    return isObject(metadata) && metadata.flavor === 'pi' ? 'steer' : 'queue'
+}
+
+/**
+ * Native steer is scoped to the Pi turn active at the initial live emit. Once
+ * a durable row is delivered through reconnect, backfill, a clear gate, or a
+ * scheduled scan, that turn identity is no longer provable. Preserve stored
+ * provenance for Web diagnostics, but make deferred CLI delivery an ordinary
+ * queue item so it cannot steer a later generation.
+ */
+function contentForDeferredDelivery(content: unknown): unknown {
+    if (!isObject(content) || content.role !== 'user' || !isObject(content.meta)) {
+        return content
+    }
+    if (content.meta.deliveryMode !== 'steer') return content
+    return {
+        ...content,
+        meta: {
+            ...content.meta,
+            deliveryMode: 'queue' as const
+        }
+    }
 }
 
 export class MessageService {
@@ -126,38 +171,83 @@ export class MessageService {
             }
         }
 
+        // Chronological ASC for archive readability (store list is DESC).
+        const scratchlist = this.store.scratchlist.list(sessionId)
+            .slice()
+            .sort((a, b) => {
+                if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt
+                return a.entryId < b.entryId ? -1 : a.entryId > b.entryId ? 1 : 0
+            })
+            .map((row) => ({
+                entryId: row.entryId,
+                text: row.text,
+                createdAt: row.createdAt,
+                updatedAt: row.updatedAt,
+                attachments: row.attachments
+            }))
+
         return {
             type: 'success',
             payload: {
                 schemaVersion: HAPI_SESSION_EXPORT_SCHEMA_VERSION,
                 exportedAt: Date.now(),
                 session,
-                messages
+                messages,
+                scratchlist
             }
         }
     }
 
     getMessagesPage(
         sessionId: string,
-        options: { limit: number; before?: { at: number; seq: number } | null }
-    ): {
-        messages: DecryptedMessage[]
-        page: {
+        options: {
             limit: number
-            nextBeforeSeq: number | null
-            nextBeforeAt: number | null
-            hasMore: boolean
+            before?: MessagePosition | null
+            after?: MessagePosition | null
+            until?: MessagePosition | null
+            epoch?: number | null
         }
-    } {
-        let before = options.before ?? undefined
-        let pageRows = this.store.messages.getMessagesByPosition(sessionId, options.limit, before)
+    ): MessagesResponse {
+        const epoch = this.store.messages.getMessageEpoch(sessionId)
+        if (options.after) {
+            if (options.epoch !== undefined && options.epoch !== null && options.epoch !== epoch) {
+                return this.getLatestOrBeforeMessagesPage(sessionId, options.limit, null, epoch, true)
+            }
+            return this.getAfterMessagesPage(
+                sessionId,
+                options.limit,
+                options.after,
+                options.until ?? null,
+                epoch
+            )
+        }
+        return this.getLatestOrBeforeMessagesPage(
+            sessionId,
+            options.limit,
+            options.before ?? null,
+            epoch,
+            false
+        )
+    }
+
+    private getLatestOrBeforeMessagesPage(
+        sessionId: string,
+        limit: number,
+        requestedBefore: MessagePosition | null,
+        epoch: number,
+        reset: boolean
+    ): MessagesResponse {
+        const direction = requestedBefore ? 'before' as const : 'latest' as const
+        const snapshotHead = this.store.messages.getNewestMessagePosition(sessionId)
+        let before = requestedBefore ?? undefined
+        let pageRows = this.store.messages.getMessagesByPosition(sessionId, limit, requestedBefore ?? undefined)
 
         // Latest-page request (no cursor): also include uninvoked local user messages
         // out-of-band, so refresh / secondary clients can still see queued rows even
         // when their position key (createdAt) places them outside the latest page.
         // The cursor stays anchored to pageRows so out-of-band rows don't affect
         // pagination of older pages.
-        let queuedRows = before === undefined
+        let queuedRows = requestedBefore === null
             ? this.store.messages.getUninvokedLocalMessages(sessionId)
             : []
 
@@ -190,7 +280,7 @@ export class MessageService {
 
         while (messages.length === 0 && hasMore && oldestSeq !== null && oldestPositionAt !== null) {
             before = { at: oldestPositionAt, seq: oldestSeq }
-            pageRows = this.store.messages.getMessagesByPosition(sessionId, options.limit, before)
+            pageRows = this.store.messages.getMessagesByPosition(sessionId, limit, before)
             queuedRows = []
 
             byId = new Map<string, typeof pageRows[number]>()
@@ -219,9 +309,75 @@ export class MessageService {
         return {
             messages,
             page: {
-                limit: options.limit,
+                direction,
+                limit,
+                epoch,
+                reset,
                 nextBeforeSeq: oldestSeq,
                 nextBeforeAt: oldestPositionAt,
+                nextAfterSeq: null,
+                nextAfterAt: null,
+                snapshotHeadSeq: snapshotHead?.seq ?? null,
+                snapshotHeadAt: snapshotHead?.at ?? null,
+                hasMore
+            }
+        }
+    }
+
+    private getAfterMessagesPage(
+        sessionId: string,
+        limit: number,
+        after: MessagePosition,
+        requestedUntil: MessagePosition | null,
+        epoch: number
+    ): MessagesResponse {
+        const currentHead = this.store.messages.getNewestMessagePosition(sessionId)
+        const snapshotHead = currentHead && requestedUntil
+            ? (comparePosition(requestedUntil, currentHead) <= 0 ? requestedUntil : currentHead)
+            : requestedUntil ?? currentHead
+
+        if (!snapshotHead || comparePosition(snapshotHead, after) <= 0) {
+            return {
+                messages: [],
+                page: {
+                    direction: 'after',
+                    limit,
+                    epoch,
+                    reset: false,
+                    nextBeforeSeq: null,
+                    nextBeforeAt: null,
+                    nextAfterSeq: after.seq,
+                    nextAfterAt: after.at,
+                    snapshotHeadSeq: snapshotHead?.seq ?? null,
+                    snapshotHeadAt: snapshotHead?.at ?? null,
+                    hasMore: false
+                }
+            }
+        }
+
+        const pageRows = this.store.messages.getMessagesAfterPosition(
+            sessionId,
+            limit,
+            after,
+            snapshotHead
+        )
+        const last = pageRows[pageRows.length - 1] ?? null
+        const nextAfter = last ? messagePosition(last) : snapshotHead
+        const hasMore = last !== null && comparePosition(nextAfter, snapshotHead) < 0
+
+        return {
+            messages: toVisibleDecryptedMessages(pageRows),
+            page: {
+                direction: 'after',
+                limit,
+                epoch,
+                reset: false,
+                nextBeforeSeq: null,
+                nextBeforeAt: null,
+                nextAfterSeq: nextAfter.seq,
+                nextAfterAt: nextAfter.at,
+                snapshotHeadSeq: snapshotHead.seq,
+                snapshotHeadAt: snapshotHead.at,
                 hasMore
             }
         }
@@ -240,7 +396,7 @@ export class MessageService {
             id: message.id,
             seq: message.seq,
             localId: message.localId,
-            content: message.content,
+            content: contentForDeferredDelivery(message.content),
             createdAt: message.createdAt,
             invokedAt: message.invokedAt,
             scheduledAt: message.scheduledAt
@@ -451,8 +607,9 @@ export class MessageService {
             attachments?: AttachmentMetadata[]
             sentFrom?: 'telegram-bot' | 'webapp'
             scheduledAt?: number | null
+            deliveryMode?: MessageDeliveryMode
         }
-    ): Promise<void> {
+    ): Promise<{ actualSessionId: string; createdAt: number }> {
         // Defence-in-depth invariant for non-REST callers (Telegram bot, MCP,
         // internal callers).  Attachment paths live under the CLI session's
         // upload directory which `cleanupUploadDir` purges on session end; a
@@ -466,6 +623,11 @@ export class MessageService {
         }
 
         const sentFrom = payload.sentFrom ?? 'webapp'
+        const deliveryMode = getNormalizedDeliveryMode(
+            this.store.sessions.getSession(sessionId)?.metadata,
+            payload.deliveryMode,
+            payload.scheduledAt
+        )
 
         const content = {
             role: 'user',
@@ -475,17 +637,27 @@ export class MessageService {
                 attachments: payload.attachments
             },
             meta: {
-                sentFrom
+                sentFrom,
+                deliveryMode
             }
         }
 
-        const msg = this.store.messages.addMessage(
+        const inserted = this.store.addMessageForCurrentSession(
             sessionId,
             content,
             payload.localId ?? undefined,
             payload.scheduledAt ?? null
         )
-        this.onSessionActivity?.(sessionId, msg.createdAt)
+        const actualSessionId = inserted.sessionId
+        const msg = inserted.message
+        // A duplicate localId is an idempotent retry, not proof that the
+        // original Pi turn still exists. Its stored row may retain steer
+        // provenance from a POST whose response was lost, so deliver the
+        // duplicate through the same turn-safe deferred view as reconnect.
+        const cliContent = inserted.inserted
+            ? msg.content
+            : contentForDeferredDelivery(msg.content)
+        this.onSessionActivity?.(actualSessionId, msg.createdAt)
 
         // Only emit to CLI if the message is not scheduled for the future.
         // Mature or non-scheduled messages go through immediately; future scheduled
@@ -494,30 +666,30 @@ export class MessageService {
         // the pre-insert `now` capture could misclassify a borderline scheduledAt
         // as future when it has already become past by the time we check.
         const isFutureScheduled = msg.scheduledAt !== null && msg.scheduledAt > Date.now()
-        if (!isFutureScheduled) {
+        if (!isFutureScheduled && !this.store.isOpenCodeClearDeliveryGated(actualSessionId)) {
             const update = {
                 id: msg.id,
                 seq: msg.seq,
                 createdAt: msg.createdAt,
                 body: {
                     t: 'new-message' as const,
-                    sid: sessionId,
+                    sid: actualSessionId,
                     message: {
                         id: msg.id,
                         seq: msg.seq,
                         createdAt: msg.createdAt,
                         localId: msg.localId,
-                        content: msg.content
+                        content: cliContent
                     }
                 }
             }
-            this.io.of('/cli').to(`session:${sessionId}`).emit('update', update)
+            this.io.of('/cli').to(`session:${actualSessionId}`).emit('update', update)
         }
 
         // Always emit message-received to Web SSE so the floating bar renders.
         this.publisher.emit({
             type: 'message-received',
-            sessionId,
+            sessionId: actualSessionId,
             message: {
                 id: msg.id,
                 seq: msg.seq,
@@ -528,6 +700,7 @@ export class MessageService {
                 scheduledAt: msg.scheduledAt
             }
         })
+        return { actualSessionId, createdAt: msg.createdAt }
     }
 
     /**
@@ -561,6 +734,59 @@ export class MessageService {
         return { localIds, invokedAt }
     }
 
+    /** Replay durable immediate prompts whenever their CLI session attaches. */
+    replayImmediateQueuedMessages(sessionId: string): number {
+        if (this.store.isOpenCodeClearDeliveryGated(sessionId)) return 0
+        const queued = this.store.messages.getImmediateQueuedLocalMessages(sessionId)
+        for (const msg of queued) {
+            const update = {
+                id: msg.id,
+                seq: msg.seq,
+                createdAt: msg.createdAt,
+                body: {
+                    t: 'new-message' as const,
+                    sid: sessionId,
+                    message: {
+                        id: msg.id,
+                        seq: msg.seq,
+                        createdAt: msg.createdAt,
+                        localId: msg.localId,
+                        content: contentForDeferredDelivery(msg.content)
+                    }
+                }
+            }
+            this.io.of('/cli').to(`session:${sessionId}`).emit('update', update)
+        }
+        return queued.length
+    }
+
+    /** Release a completed clear handoff in finalized seq order. */
+    releaseDeliverableQueuedMessages(sessionId: string, now: number = Date.now()): number {
+        if (this.store.isOpenCodeClearDeliveryGated(sessionId)) return 0
+        const queued = this.store.messages.getUninvokedLocalMessages(sessionId)
+            .filter((msg) => msg.scheduledAt === null || msg.scheduledAt <= now)
+        for (const msg of queued) {
+            const update = {
+                id: msg.id,
+                seq: msg.seq,
+                createdAt: msg.createdAt,
+                body: {
+                    t: 'new-message' as const,
+                    sid: sessionId,
+                    message: {
+                        id: msg.id,
+                        seq: msg.seq,
+                        createdAt: msg.createdAt,
+                        localId: msg.localId,
+                        content: contentForDeferredDelivery(msg.content)
+                    }
+                }
+            }
+            this.io.of('/cli').to(`session:${sessionId}`).emit('update', update)
+        }
+        return queued.length
+    }
+
     /** Called by the hub 5-second tick (syncEngine.expireInactive).
      *
      * Finds all scheduled messages whose scheduled_at <= now and emits them to
@@ -576,10 +802,19 @@ export class MessageService {
      * preserved).  Web client surfaces this as 'sent' in the thread.
      * See messageService.test.ts "cancel × mature race" for the documented
      * expected behaviour. */
-    releaseMatureScheduledMessages(now: number): void {
+    releaseMatureScheduledMessages(now: number, skipSessionIds?: ReadonlySet<string>): void {
         const mature = this.store.messages.getMatureScheduledMessages(now)
         const maturedSessionIds = new Set<string>()
+        const deliveryGateBySession = new Map<string, boolean>()
         for (const msg of mature) {
+            let deliveryGated = deliveryGateBySession.get(msg.sessionId)
+            if (deliveryGated === undefined) {
+                deliveryGated = this.store.isOpenCodeClearDeliveryGated(msg.sessionId)
+                deliveryGateBySession.set(msg.sessionId, deliveryGated)
+            }
+            if (skipSessionIds?.has(msg.sessionId) || deliveryGated) {
+                continue
+            }
             const localId = msg.localId
             if (typeof localId === 'string' && !this.scheduledMatureNotifiedLocalIds.has(localId)) {
                 this.scheduledMatureNotifiedLocalIds.add(localId)
@@ -597,7 +832,7 @@ export class MessageService {
                         seq: msg.seq,
                         createdAt: msg.createdAt,
                         localId: msg.localId,
-                        content: msg.content
+                        content: contentForDeferredDelivery(msg.content)
                     }
                 }
             }

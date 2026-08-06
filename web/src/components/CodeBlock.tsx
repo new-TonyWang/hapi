@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react'
+import { type CSSProperties, type ReactNode } from 'react'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { useCodeWrap } from '@/hooks/useCodeWrap'
 import { useShikiHighlightedLines, splitCodeLines } from '@/lib/shiki'
@@ -9,6 +9,7 @@ const DEFAULT_COLLAPSE_LINE_THRESHOLD = 18
 const DEFAULT_COLLAPSE_CHAR_THRESHOLD = 1800
 const DEFAULT_COLLAPSED_HEIGHT = 260
 const DEFAULT_SCROLL_HEIGHT = 420
+const GUTTER_HORIZONTAL_PADDING_REM = 1.5
 
 function shouldCollapseCode(code: string, lineThreshold: number, charThreshold: number): boolean {
     if (code.length > charThreshold) return true
@@ -34,6 +35,12 @@ export function CodeBlock(props: {
     size?: 'compact' | 'comfortable'
     collapseLineThreshold?: number
     collapseCharThreshold?: number
+    /**
+     * First line's number in the gutter (default 1). Set to the true starting
+     * line when showing a partial slice of a file (e.g. a Read of lines 50–100)
+     * so the gutter isn't misleadingly numbered from 1.
+     */
+    startLineNumber?: number
 }) {
     const { t } = useTranslation()
     const showCopyButton = props.showCopyButton ?? true
@@ -68,14 +75,15 @@ export function CodeBlock(props: {
     // on newlines using the same normalization, so line numbers match.
     const fallbackLines = splitCodeLines(props.code)
     const codeLines: ReactNode[] = highlightedLines ?? fallbackLines
-    const lineNumberWidth = Math.max(String(codeLines.length).length, 3)
+    const firstLine = props.startLineNumber ?? 1
+    const lineNumberWidth = Math.max(String(firstLine + codeLines.length - 1).length, 3)
     const label = formatCodeLabel(props.language, props.title)
     // First track sizes to the line-number column; the code column takes the
     // rest. When wrapped the code column is capped to the container width
     // (minmax(0,1fr)) so long lines wrap instead of overflowing; unwrapped it
     // grows to its content (max-content) inside the horizontal-scroll body.
     const codeGridStyle = {
-        gridTemplateColumns: `${lineNumberWidth}ch ${codeWrap ? 'minmax(0, 1fr)' : 'max-content'}`
+        gridTemplateColumns: `calc(${lineNumberWidth}ch + ${GUTTER_HORIZONTAL_PADDING_REM}rem) ${codeWrap ? 'minmax(0, 1fr)' : 'max-content'}`
     } satisfies CSSProperties
     const codeCellStyle = codeWrap
         ? { whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }
@@ -87,7 +95,7 @@ export function CodeBlock(props: {
             : { overflowY: 'hidden' as const }
 
     return (
-        <div className="aui-code-surface relative min-w-0 max-w-full overflow-hidden rounded-xl bg-[var(--app-code-bg)] shadow-none">
+        <div data-hapi-code-block="true" className="aui-code-surface relative min-w-0 max-w-full overflow-hidden rounded-xl bg-[var(--app-code-bg)] shadow-none">
             <div className="aui-code-surface-header flex items-center justify-between gap-3 bg-[var(--app-code-header-bg)] px-3 py-2">
                 <div className="min-w-0 flex-1 truncate font-mono text-[11px] uppercase tracking-[0.08em] text-[var(--app-code-header-fg)]">
                     {label}
@@ -96,6 +104,10 @@ export function CodeBlock(props: {
                     {showWrapToggle ? (
                         <button
                             type="button"
+                            data-hapi-code-wrap-toggle="true"
+                            data-hapi-wrap-enable-label={t('code.wrap.enable')}
+                            data-hapi-wrap-disable-label={t('code.wrap.disable')}
+                            data-hapi-share-export-exclude="true"
                             onClick={(event) => {
                                 event.stopPropagation()
                                 setCodeWrap(!codeWrap)
@@ -110,6 +122,10 @@ export function CodeBlock(props: {
                     {showCopyButton ? (
                         <button
                             type="button"
+                            data-hapi-code-copy="true"
+                            data-hapi-copy-label={t('code.copy')}
+                            data-hapi-copied-label={t('message.copied')}
+                            data-hapi-share-export-exclude="true"
                             onClick={(event) => {
                                 event.stopPropagation()
                                 copy(props.code)
@@ -117,17 +133,24 @@ export function CodeBlock(props: {
                             className="rounded-md p-1 text-[var(--app-code-header-fg)] transition-colors hover:bg-[var(--app-code-copy-hover-bg)] hover:text-[var(--app-fg)]"
                             title={t('code.copy')}
                         >
-                            {copied ? <CheckIcon className="h-3.5 w-3.5" /> : <CopyIcon className="h-3.5 w-3.5" />}
+                            <span data-hapi-copy-default="true" className={copied ? 'hidden' : ''}>
+                                <CopyIcon className="h-3.5 w-3.5" />
+                            </span>
+                            <span data-hapi-copy-success="true" className={copied ? '' : 'hidden'}>
+                                <CheckIcon className="h-3.5 w-3.5" />
+                            </span>
                         </button>
                     ) : null}
                 </div>
             </div>
 
             <div
+                data-hapi-code-body="true"
                 className={`min-w-0 w-full max-w-full ${codeWrap ? '' : 'overflow-x-auto'}`}
                 style={bodyStyle}
             >
                 <pre
+                    data-hapi-code-grid="true"
                     className={`shiki m-0 grid ${codeWrap ? 'w-full' : 'w-max min-w-full'} font-mono ${codeTextClass}`}
                     style={codeGridStyle}
                 >
@@ -142,7 +165,7 @@ export function CodeBlock(props: {
                                     aria-hidden="true"
                                     className={`select-none bg-[var(--app-code-header-bg)] px-3 text-right text-[var(--app-hint)]/70 ${rowPad}`}
                                 >
-                                    {index + 1}
+                                    {firstLine + index}
                                 </span>
                                 <span data-code-cell className={`pl-4 pr-8 ${rowPad}`} style={codeCellStyle}>
                                     {line}

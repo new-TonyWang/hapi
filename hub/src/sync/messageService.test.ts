@@ -190,6 +190,71 @@ describe('MessageService goal status filtering', () => {
         })
     })
 
+    it('includes scratchlist text and attachment metadata in chronological order (tiann/hapi#1235)', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'session-export-scratchlist')
+
+        store.messages.addMessage(session.id, { role: 'user', content: 'Hello' })
+        const older = store.scratchlist.create(session.id, 'Park this idea', {
+            entryId: 'entry-older',
+            createdAt: 1_000,
+            attachments: [{
+                id: 'att-1',
+                filename: 'note.png',
+                mimeType: 'image/png',
+                size: 42,
+                path: 'hapi-hub:scratchlist/att-1'
+            }]
+        })
+        const newer = store.scratchlist.create(session.id, 'Follow up tomorrow', {
+            entryId: 'entry-newer',
+            createdAt: 2_000
+        })
+        expect(older.outcome).toBe('created')
+        expect(newer.outcome).toBe('created')
+
+        const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
+        const result = service.getSessionExport(session.id, toProtocolSession(session))
+
+        expect(result.type).toBe('success')
+        if (result.type !== 'success') throw new Error('Expected success export')
+        expect(result.payload.schemaVersion).toBe(2)
+        expect(result.payload.scratchlist).toEqual([
+            {
+                entryId: 'entry-older',
+                text: 'Park this idea',
+                createdAt: 1_000,
+                updatedAt: expect.any(Number),
+                attachments: [{
+                    id: 'att-1',
+                    filename: 'note.png',
+                    mimeType: 'image/png',
+                    size: 42,
+                    path: 'hapi-hub:scratchlist/att-1'
+                }]
+            },
+            {
+                entryId: 'entry-newer',
+                text: 'Follow up tomorrow',
+                createdAt: 2_000,
+                updatedAt: expect.any(Number),
+                attachments: []
+            }
+        ])
+    })
+
+    it('emits an empty scratchlist array when the session has no notes', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'session-export-no-scratchlist')
+
+        const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
+        const result = service.getSessionExport(session.id, toProtocolSession(session))
+
+        expect(result.type).toBe('success')
+        if (result.type !== 'success') throw new Error('Expected success export')
+        expect(result.payload.scratchlist).toEqual([])
+    })
+
     it('pages past hidden-only goal status rows', () => {
         const store = makeStore()
         const session = makeSession(store, 'goal-status-pagination')
@@ -243,6 +308,11 @@ describe('MessageService message pagination', () => {
         expect(page.messages.map((message) => message.id)).toEqual([second.id, third.id])
         expect(page.page.nextBeforeAt).toBe(2_000)
         expect(page.page.nextBeforeSeq).toBe(second.seq)
+        expect(page.page.direction).toBe('latest')
+        expect(page.page.epoch).toBe(0)
+        expect(page.page.reset).toBe(false)
+        expect(page.page.snapshotHeadAt).toBe(3_000)
+        expect(page.page.snapshotHeadSeq).toBe(third.seq)
         expect(page.page.hasMore).toBe(true)
         expect(first.id).toBeDefined()
     })
@@ -266,6 +336,7 @@ describe('MessageService message pagination', () => {
         expect(older.messages.map((message) => message.id)).toEqual([first.id])
         expect(older.page.nextBeforeAt).toBe(1_000)
         expect(older.page.nextBeforeSeq).toBe(first.seq)
+        expect(older.page.direction).toBe('before')
         expect(older.page.hasMore).toBe(false)
         expect(second.id).toBeDefined()
         expect(third.id).toBeDefined()
@@ -304,6 +375,97 @@ describe('MessageService message pagination', () => {
         expect(page.page.nextBeforeAt).toBe(scheduled.createdAt + 1_000)
         expect(page.page.nextBeforeSeq).toBe(invoked.seq)
         expect(page.page.hasMore).toBe(true)
+    })
+
+    it('pages forward to a fixed snapshot head', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'page-after')
+        const first = store.messages.addMessage(session.id, 'first', 'local-first')
+        const second = store.messages.addMessage(session.id, 'second', 'local-second')
+        const third = store.messages.addMessage(session.id, 'third', 'local-third')
+        const fourth = store.messages.addMessage(session.id, 'fourth', 'local-fourth')
+        store.messages.markMessagesInvoked(session.id, ['local-first'], 1_000)
+        store.messages.markMessagesInvoked(session.id, ['local-second'], 2_000)
+        store.messages.markMessagesInvoked(session.id, ['local-third'], 3_000)
+        store.messages.markMessagesInvoked(session.id, ['local-fourth'], 4_000)
+
+        const service = makeService(store)
+        const firstDelta = service.getMessagesPage(session.id, {
+            limit: 1,
+            after: { at: 1_000, seq: first.seq },
+            epoch: 0
+        })
+
+        expect(firstDelta.messages.map((message) => message.id)).toEqual([second.id])
+        expect(firstDelta.page).toMatchObject({
+            direction: 'after',
+            nextAfterAt: 2_000,
+            nextAfterSeq: second.seq,
+            snapshotHeadAt: 4_000,
+            snapshotHeadSeq: fourth.seq,
+            hasMore: true,
+            reset: false
+        })
+
+        const fifth = store.messages.addMessage(session.id, 'fifth', 'local-fifth')
+        store.messages.markMessagesInvoked(session.id, ['local-fifth'], 5_000)
+
+        const secondDelta = service.getMessagesPage(session.id, {
+            limit: 10,
+            after: { at: firstDelta.page.nextAfterAt!, seq: firstDelta.page.nextAfterSeq! },
+            until: { at: firstDelta.page.snapshotHeadAt!, seq: firstDelta.page.snapshotHeadSeq! },
+            epoch: firstDelta.page.epoch
+        })
+
+        expect(secondDelta.messages.map((message) => message.id)).toEqual([third.id, fourth.id])
+        expect(secondDelta.page.hasMore).toBe(false)
+        expect(secondDelta.messages.some((message) => message.id === fifth.id)).toBe(false)
+    })
+
+    it('completes a fixed snapshot when no raw row remains before its head', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'page-after-empty-snapshot-gap')
+        const first = store.messages.addMessage(session.id, 'first', 'local-first')
+        const latest = store.messages.addMessage(session.id, 'latest', 'local-latest')
+        store.messages.markMessagesInvoked(session.id, ['local-first'], 1_000)
+        store.messages.markMessagesInvoked(session.id, ['local-latest'], 4_000)
+
+        const response = makeService(store).getMessagesPage(session.id, {
+            limit: 10,
+            after: { at: 2_000, seq: first.seq },
+            until: { at: 3_000, seq: latest.seq },
+            epoch: 0
+        })
+
+        expect(response.messages).toEqual([])
+        expect(response.page).toMatchObject({
+            direction: 'after',
+            nextAfterAt: 3_000,
+            nextAfterSeq: latest.seq,
+            snapshotHeadAt: 3_000,
+            snapshotHeadSeq: latest.seq,
+            hasMore: false
+        })
+    })
+
+    it('returns a reset latest page when the structural epoch changed', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'page-after-reset')
+        const first = store.messages.addMessage(session.id, 'first', 'local-first')
+        store.messages.markMessagesInvoked(session.id, ['local-first'], 1_000)
+        const queued = store.messages.addMessage(session.id, 'queued', 'local-queued')
+        store.messages.cancelQueuedMessage(session.id, queued.id)
+
+        const response = makeService(store).getMessagesPage(session.id, {
+            limit: 10,
+            after: { at: 1_000, seq: first.seq },
+            epoch: 0
+        })
+
+        expect(response.page.direction).toBe('latest')
+        expect(response.page.reset).toBe(true)
+        expect(response.page.epoch).toBe(1)
+        expect(response.messages.map((message) => message.id)).toEqual([first.id])
     })
 })
 
@@ -941,6 +1103,236 @@ describe('MessageService.sendMessage with scheduledAt', () => {
 
         const msgs = store.messages.getUninvokedLocalMessages(session.id)
         expect(msgs).toHaveLength(1)
+    })
+})
+
+describe('MessageService.sendMessage deliveryMode', () => {
+    function makeTrackingIo(): { io: Server; cliEmitted: unknown[] } {
+        const cliEmitted: unknown[] = []
+        const io = {
+            of: (ns: string) => ({
+                to: (_room: string) => ({
+                    emit: (_event: string, data: unknown) => {
+                        if (ns === '/cli') cliEmitted.push(data)
+                    },
+                    timeout: (_ms: number) => ({ emit: () => {} })
+                }),
+                adapter: { rooms: { get: () => undefined } }
+            })
+        } as unknown as Server
+        return { io, cliEmitted }
+    }
+
+    it('persists Pi steer provenance but downgrades every deferred CLI delivery to queue', async () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession(
+            'delivery-mode-pi',
+            { path: '/tmp/delivery-mode-pi', host: 'localhost', flavor: 'pi' },
+            null,
+            'default'
+        )
+        const publisher = makePublisher()
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, publisher as any)
+
+        await service.sendMessage(session.id, {
+            text: 'steer this Pi turn',
+            localId: 'pi-steer',
+            deliveryMode: 'steer'
+        })
+
+        const stored = store.messages.getUninvokedLocalMessages(session.id)
+        expect(stored).toHaveLength(1)
+        expect(stored[0]?.content).toMatchObject({
+            role: 'user',
+            meta: { sentFrom: 'webapp', deliveryMode: 'steer' }
+        })
+        expect(cliEmitted).toHaveLength(1)
+        expect(cliEmitted[0]).toMatchObject({
+            body: { message: { content: { meta: { deliveryMode: 'steer' } } } }
+        })
+
+        expect(service.replayImmediateQueuedMessages(session.id)).toBe(1)
+        expect(cliEmitted).toHaveLength(2)
+        expect(cliEmitted[1]).toMatchObject({
+            body: { message: { content: { meta: { deliveryMode: 'queue' } } } }
+        })
+
+        const backfill = service.getDeliverableMessagesAfter(session.id, {
+            afterSeq: 0,
+            limit: 10,
+            now: Date.now()
+        })
+        expect(backfill).toHaveLength(1)
+        expect(backfill[0]?.content).toMatchObject({ meta: { deliveryMode: 'queue' } })
+
+        expect(service.releaseDeliverableQueuedMessages(session.id)).toBe(1)
+        expect(cliEmitted).toHaveLength(3)
+        expect(cliEmitted[2]).toMatchObject({
+            body: { message: { content: { meta: { deliveryMode: 'queue' } } } }
+        })
+
+        // Deferred delivery is a view transformation only. The database keeps
+        // the original provenance for Web display and diagnostics.
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]?.content).toMatchObject({
+            role: 'user',
+            meta: { sentFrom: 'webapp', deliveryMode: 'steer' }
+        })
+    })
+
+    it('delivers a duplicate-localId retry as queue even when the stored row retains steer', async () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession(
+            'delivery-mode-duplicate-pi',
+            { path: '/tmp/delivery-mode-duplicate-pi', host: 'localhost', flavor: 'pi' },
+            null,
+            'default'
+        )
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, makePublisher() as any)
+
+        await service.sendMessage(session.id, {
+            text: 'original steer whose response is lost',
+            localId: 'duplicate-steer',
+            deliveryMode: 'steer'
+        })
+        await service.sendMessage(session.id, {
+            text: 'retry requests queue',
+            localId: 'duplicate-steer',
+            deliveryMode: 'queue'
+        })
+
+        expect(cliEmitted).toHaveLength(2)
+        expect(cliEmitted[0]).toMatchObject({
+            body: { message: { content: { meta: { deliveryMode: 'steer' } } } }
+        })
+        expect(cliEmitted[1]).toMatchObject({
+            body: { message: { content: { meta: { deliveryMode: 'queue' } } } }
+        })
+        const rows = store.messages.getUninvokedLocalMessages(session.id)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]?.content).toMatchObject({
+            role: 'user',
+            content: { text: 'original steer whose response is lost' },
+            meta: { sentFrom: 'webapp', deliveryMode: 'steer' }
+        })
+    })
+
+    it('downgrades a legacy persisted steer through the mature scheduled scan', () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession(
+            'delivery-mode-mature-pi',
+            { path: '/tmp/delivery-mode-mature-pi', host: 'localhost', flavor: 'pi' },
+            null,
+            'default'
+        )
+        const publisher = makePublisher()
+        const { io, cliEmitted } = makeTrackingIo()
+        const service = new MessageService(store, io, publisher as any)
+        const scheduledAt = Date.now() - 1_000
+
+        store.messages.addMessage(
+            session.id,
+            {
+                role: 'user',
+                content: { type: 'text', text: 'legacy scheduled steer' },
+                meta: { sentFrom: 'webapp', deliveryMode: 'steer' }
+            },
+            'mature-steer',
+            scheduledAt
+        )
+
+        service.releaseMatureScheduledMessages(Date.now())
+
+        expect(cliEmitted).toHaveLength(1)
+        expect(cliEmitted[0]).toMatchObject({
+            body: { message: { content: { meta: { deliveryMode: 'queue' } } } }
+        })
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]?.content).toMatchObject({
+            role: 'user',
+            meta: { sentFrom: 'webapp', deliveryMode: 'steer' }
+        })
+    })
+
+    it('leaves non-user and already-queued content unchanged during CLI backfill', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'delivery-mode-backfill-guards')
+        const service = new MessageService(store, makeTrackingIo().io, makePublisher() as any)
+        const agentContent = {
+            role: 'agent',
+            content: { type: 'text', text: 'agent event' },
+            meta: { deliveryMode: 'steer', marker: 'keep-agent' }
+        }
+        const userWithoutMeta = {
+            role: 'user',
+            content: { type: 'text', text: 'legacy user' }
+        }
+        const queuedUser = {
+            role: 'user',
+            content: { type: 'text', text: 'already queued' },
+            meta: { sentFrom: 'webapp', deliveryMode: 'queue', marker: 'keep-user' }
+        }
+
+        store.messages.addMessage(session.id, agentContent)
+        store.messages.addMessage(session.id, userWithoutMeta, 'legacy-user')
+        store.messages.addMessage(session.id, queuedUser, 'queued-user')
+
+        const backfill = service.getDeliverableMessagesAfter(session.id, {
+            afterSeq: 0,
+            limit: 10,
+            now: Date.now()
+        })
+
+        expect(backfill.map((message) => message.content)).toEqual([
+            agentContent,
+            userWithoutMeta,
+            queuedUser
+        ])
+    })
+
+    it('downgrades forged steer intent for non-Pi sessions and defaults omitted intent to queue', async () => {
+        const store = makeStore()
+        const session = makeSession(store, 'delivery-mode-non-pi')
+        const service = new MessageService(store, makeTrackingIo().io, makePublisher() as any)
+
+        await service.sendMessage(session.id, {
+            text: 'forged steer',
+            localId: 'non-pi-steer',
+            deliveryMode: 'steer'
+        })
+        await service.sendMessage(session.id, {
+            text: 'missing mode',
+            localId: 'missing-mode'
+        })
+
+        const rows = store.messages.getUninvokedLocalMessages(session.id)
+        expect(rows).toHaveLength(2)
+        expect(rows.map((row) => {
+            const content = row.content as { meta?: { deliveryMode?: unknown } }
+            return content.meta?.deliveryMode
+        })).toEqual(['queue', 'queue'])
+    })
+
+    it('normalizes direct scheduled steer requests to queue', async () => {
+        const store = makeStore()
+        const session = store.sessions.getOrCreateSession(
+            'delivery-mode-pi-scheduled',
+            { path: '/tmp/delivery-mode-pi-scheduled', host: 'localhost', flavor: 'pi' },
+            null,
+            'default'
+        )
+        const service = new MessageService(store, makeTrackingIo().io, makePublisher() as any)
+
+        await service.sendMessage(session.id, {
+            text: 'scheduled steer',
+            localId: 'pi-scheduled-steer',
+            scheduledAt: Date.now() + 60_000,
+            deliveryMode: 'steer'
+        })
+
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]?.content).toMatchObject({
+            meta: { deliveryMode: 'queue' }
+        })
     })
 })
 

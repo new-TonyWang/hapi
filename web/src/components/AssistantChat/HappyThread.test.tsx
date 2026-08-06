@@ -5,10 +5,14 @@ import { I18nProvider } from '@/lib/i18n-context'
 import {
     ConversationOutlinePanel,
     captureScrollAnchor,
+    getHistoryCoverageRetryDelay,
+    getPullToLoadState,
     getScrollIntent,
+    hasAppliedHistoryVersion,
     locateOutlineTargetMessage,
     prependMissingUserSnapshot,
     restoreScrollAnchor,
+    shouldLoadOlderForViewport,
     shouldCancelInitialScrollSettling,
 } from '@/components/AssistantChat/HappyThread'
 import type { ConversationOutlineItem } from '@/chat/outline'
@@ -118,7 +122,9 @@ describe('ConversationOutlinePanel', () => {
         const onClose = vi.fn()
         renderPanel({ onClose })
 
-        fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+        const closeButton = screen.getByRole('button', { name: 'Close' })
+        expect(closeButton).toHaveClass('border', 'rounded-md', 'h-9', 'w-9')
+        fireEvent.click(closeButton)
 
         expect(onClose).toHaveBeenCalledTimes(1)
     })
@@ -194,7 +200,18 @@ describe('scroll anchor helpers', () => {
             distanceFromBottom: 182,
             isScrollingUp: true
         })
-        expect(shouldCancelInitialScrollSettling(intent)).toBe(true)
+        expect(shouldCancelInitialScrollSettling(intent, true)).toBe(true)
+    })
+
+    it('keeps initial scroll settling for programmatic upward movement', () => {
+        const intent = getScrollIntent({
+            scrollTop: 0,
+            previousScrollTop: 700,
+            scrollHeight: 1232,
+            clientHeight: 530
+        })
+
+        expect(shouldCancelInitialScrollSettling(intent, false)).toBe(false)
     })
 
     it('keeps initial scroll settling for negligible movement at the bottom', () => {
@@ -209,7 +226,7 @@ describe('scroll anchor helpers', () => {
             distanceFromBottom: 0,
             isScrollingUp: false
         })
-        expect(shouldCancelInitialScrollSettling(intent)).toBe(false)
+        expect(shouldCancelInitialScrollSettling(intent, false)).toBe(false)
     })
 
     it('restores the captured message to the same viewport offset', () => {
@@ -227,6 +244,42 @@ describe('scroll anchor helpers', () => {
         expect(viewport.scrollTop).toBe(250)
 
         viewport.remove()
+    })
+
+    it('waits until assistant-ui has applied the loaded history version', () => {
+        expect(hasAppliedHistoryVersion(4, 4)).toBe(false)
+        expect(hasAppliedHistoryVersion(4, 5)).toBe(true)
+    })
+})
+
+describe('top-triggered history loading', () => {
+    it('recognizes an underfilled viewport and a top sentinel inside the preload margin', () => {
+        expect(shouldLoadOlderForViewport({
+            scrollHeight: 300,
+            clientHeight: 500,
+            viewportTop: 100,
+            sentinelTop: 100,
+            sentinelBottom: 101
+        })).toBe(true)
+        expect(shouldLoadOlderForViewport({
+            scrollHeight: 1_000,
+            clientHeight: 500,
+            viewportTop: 100,
+            sentinelTop: -200,
+            sentinelBottom: -199
+        })).toBe(false)
+    })
+
+    it('defers an intersection signal until the initial scroll-settling deadline', () => {
+        expect(getHistoryCoverageRetryDelay(2_800, 1_000)).toBe(1_816)
+        expect(getHistoryCoverageRetryDelay(900, 1_000)).toBe(16)
+    })
+
+    it('shows pull feedback at 16px and arms release loading at 64px', () => {
+        expect(getPullToLoadState(15)).toBe('idle')
+        expect(getPullToLoadState(16)).toBe('pulling')
+        expect(getPullToLoadState(63)).toBe('pulling')
+        expect(getPullToLoadState(64)).toBe('ready')
     })
 })
 

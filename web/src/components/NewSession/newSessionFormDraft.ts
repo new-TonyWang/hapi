@@ -1,9 +1,14 @@
 import {
     CREATABLE_AGENT_FLAVORS,
     GROK_PERMISSION_MODES,
-    type GrokPermissionMode
+    getPermissionModesForFlavor,
+    normalizeCopilotAgentMode,
+    type CodexCollaborationMode,
+    type CopilotAgentMode,
+    type GrokPermissionMode,
+    type PermissionMode
 } from '@hapi/protocol'
-import type { AgentType, LaunchEffort, CodexReasoningEffort, SessionType } from './types'
+import type { AgentType, LaunchEffort, CodexReasoningEffort, NewSessionServiceTier, SessionType } from './types'
 
 const DRAFT_STORAGE_KEY = 'hapi:new-session-form-draft'
 
@@ -16,7 +21,11 @@ export type NewSessionFormDraft = {
     modelReasoningEffort: CodexReasoningEffort
     codexProfile?: string
     codexProvider?: string
+    serviceTier: NewSessionServiceTier
+    collaborationMode: CodexCollaborationMode
+    copilotAgentMode: CopilotAgentMode
     yoloMode: boolean
+    codexFamilyPermissionMode: PermissionMode
     grokPermissionMode: GrokPermissionMode
     sessionType: SessionType
     worktreeName: string
@@ -61,7 +70,23 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
                 : 'default',
             codexProfile: agentPreserved && typeof parsed.codexProfile === 'string' ? parsed.codexProfile : '',
             codexProvider: agentPreserved && typeof parsed.codexProvider === 'string' ? parsed.codexProvider : '',
+            serviceTier: agentPreserved && parsed.serviceTier === 'fast' ? 'fast' : 'standard',
+            collaborationMode: agentPreserved && parsed.collaborationMode === 'plan' ? 'plan' : 'default',
+            copilotAgentMode: agentPreserved
+                ? normalizeCopilotAgentMode(parsed.copilotAgentMode)
+                : 'interactive',
             yoloMode: Boolean(parsed.yoloMode),
+            codexFamilyPermissionMode: (() => {
+                const modes = getPermissionModesForFlavor(restoredAgent)
+                const parsedMode = parsed.codexFamilyPermissionMode as PermissionMode | undefined
+                if (agentPreserved && parsedMode && modes.includes(parsedMode)) {
+                    return parsedMode
+                }
+                if (agentPreserved && parsed.yoloMode && modes.includes('yolo')) {
+                    return 'yolo'
+                }
+                return 'default'
+            })(),
             grokPermissionMode: agentPreserved
                 && GROK_PERMISSION_MODES.includes(parsed.grokPermissionMode as GrokPermissionMode)
                 ? parsed.grokPermissionMode as GrokPermissionMode
