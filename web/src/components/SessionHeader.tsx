@@ -230,7 +230,7 @@ export function SessionHeader(props: {
         session.id,
         session.metadata?.flavor ?? null
     )
-    const { providers: codexProviders } = useCodexModels({
+    const { providers: codexProviders, profiles: codexProfiles } = useCodexModels({
         api,
         machineId: typeof session.metadata?.machineId === 'string' ? session.metadata.machineId : null,
         enabled: agentFlavor === 'codex'
@@ -575,7 +575,9 @@ export function SessionHeader(props: {
                 isOpen={changeProviderOpen}
                 onClose={() => setChangeProviderOpen(false)}
                 currentProvider={codexProvider}
-                providers={codexProviders}
+                // Older runners expose the same configured names as profiles
+                // but do not yet return the dedicated providers field.
+                providers={[...codexProviders, ...codexProfiles]}
                 onChange={setCodexProvider}
                 isPending={isPending}
             />
