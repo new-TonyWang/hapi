@@ -130,6 +130,8 @@ describe('permission mode persistence', () => {
             _agent: string,
             _model?: string,
             _modelReasoningEffort?: string,
+            _codexProfile?: string,
+            _codexProvider?: string,
             _yolo?: boolean,
             _sessionType?: string,
             _worktreeName?: string,

@@ -444,6 +444,7 @@ export type CodexModelSummary = {
 export type CodexModelsResponse = {
     success: boolean
     models?: CodexModelSummary[]
+    profiles?: string[]
     error?: string
 }
 

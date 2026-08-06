@@ -47,4 +47,53 @@ describe('SessionHeader', () => {
 
         expect(screen.getByText('fast')).toBeInTheDocument()
     })
+
+    it('shows a selected Codex profile and omits the default profile', () => {
+        const session: Session = {
+            id: 'session-profile',
+            namespace: 'default',
+            seq: 0,
+            createdAt: 0,
+            updatedAt: 0,
+            active: true,
+            activeAt: 0,
+            metadata: { flavor: 'codex', path: '/repo', host: 'machine', codexProfile: 'tokenmax' },
+            metadataVersion: 0,
+            agentState: null,
+            agentStateVersion: 0,
+            thinking: false,
+            thinkingAt: 0,
+            model: null,
+            modelReasoningEffort: null,
+            effort: null,
+            serviceTier: null
+        }
+
+        const { rerender } = render(
+            <QueryClientProvider client={new QueryClient()}>
+                <ToastProvider>
+                    <I18nProvider>
+                        <SessionHeader session={session} onBack={vi.fn()} api={null} />
+                    </I18nProvider>
+                </ToastProvider>
+            </QueryClientProvider>
+        )
+
+        expect(screen.getByTestId('session-header-profile')).toHaveTextContent('Profile: tokenmax')
+
+        rerender(
+            <QueryClientProvider client={new QueryClient()}>
+                <ToastProvider>
+                    <I18nProvider>
+                        <SessionHeader
+                            session={{ ...session, metadata: { flavor: 'codex', path: '/repo', host: 'machine' } }}
+                            onBack={vi.fn()}
+                            api={null}
+                        />
+                    </I18nProvider>
+                </ToastProvider>
+            </QueryClientProvider>
+        )
+        expect(screen.queryByTestId('session-header-profile')).toBeNull()
+    })
 })

@@ -95,6 +95,35 @@ describe('SessionList machine filter', () => {
         expect(screen.getByTitle('/work/hapi')).toBeTruthy()
     })
 
+    it('shows a non-default Codex profile on the session row', () => {
+        renderSessionList([
+            makeSession({
+                id: 'session-profile',
+                updatedAt: 100,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    flavor: 'codex',
+                    agentSessionId: 'thread-profile',
+                    codexProfile: 'tokenmax'
+                }
+            }),
+            makeSession({
+                id: 'session-default',
+                updatedAt: 90,
+                metadata: {
+                    path: '/work/hapi',
+                    machineId: 'machine-1',
+                    flavor: 'codex',
+                    agentSessionId: 'thread-default'
+                }
+            })
+        ])
+
+        expect(screen.getByTestId('session-list-profile-session-profile')).toHaveTextContent('tokenmax')
+        expect(screen.queryByTestId('session-list-profile-session-default')).toBeNull()
+    })
+
     it('shows the filter bar and machine-suffixed group titles with multiple machines', () => {
         renderSessionList(multiMachineSessions)
 

@@ -105,6 +105,19 @@ describe('toSessionSummary', () => {
         expect(summary.metadata?.lifecycleState).toBe('archived')
     })
 
+    it('includes a non-default Codex profile in summary metadata', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor: 'codex',
+                codexProfile: 'tokenmax'
+            }
+        }))
+
+        expect(summary.metadata?.codexProfile).toBe('tokenmax')
+    })
+
     it('includes structured pendingRequests for hover-tooltip copy', () => {
         const summary = toSessionSummary(makeSession({
             updatedAt: 5000,

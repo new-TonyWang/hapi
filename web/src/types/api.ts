@@ -81,6 +81,7 @@ export type SessionMetadataSummary = {
     machineId?: string
     tools?: string[]
     flavor?: string | null
+    codexProfile?: string
     capabilities?: {
         terminal?: boolean
     }
@@ -219,6 +220,7 @@ export type CodexDesktopSyncRequest = {
     machineId?: string | null
     model?: string | null
     modelReasoningEffort?: string | null
+    codexProfile?: string | null
     yolo?: boolean
 }
 

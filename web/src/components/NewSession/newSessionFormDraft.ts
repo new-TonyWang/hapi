@@ -14,6 +14,7 @@ export type NewSessionFormDraft = {
     machineId: string | null
     effort: LaunchEffort
     modelReasoningEffort: CodexReasoningEffort
+    codexProfile?: string
     codexProvider?: string
     yoloMode: boolean
     grokPermissionMode: GrokPermissionMode
@@ -58,6 +59,7 @@ export function loadNewSessionFormDraft(): NewSessionFormDraft | null {
             modelReasoningEffort: agentPreserved
                 ? ((parsed.modelReasoningEffort as CodexReasoningEffort | undefined) ?? 'default')
                 : 'default',
+            codexProfile: agentPreserved && typeof parsed.codexProfile === 'string' ? parsed.codexProfile : '',
             codexProvider: agentPreserved && typeof parsed.codexProvider === 'string' ? parsed.codexProvider : '',
             yoloMode: Boolean(parsed.yoloMode),
             grokPermissionMode: agentPreserved

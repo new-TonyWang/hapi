@@ -11,6 +11,7 @@ type SpawnInput = {
     model?: string
     effort?: string
     modelReasoningEffort?: string
+    codexProfile?: string
     codexProvider?: string
     yolo?: boolean
     permissionMode?: PermissionMode
@@ -36,6 +37,7 @@ export function useSpawnSession(api: ApiClient | null): {
                 input.agent,
                 input.model,
                 input.modelReasoningEffort,
+                input.codexProfile,
                 input.codexProvider,
                 input.yolo,
                 input.sessionType,

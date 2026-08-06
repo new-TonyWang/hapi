@@ -872,6 +872,14 @@ function SessionItem(props: {
                         <div className={`truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}>
                             {sessionName}
                         </div>
+                        {s.metadata?.flavor === 'codex' && s.metadata.codexProfile?.trim() ? (
+                            <span
+                                data-testid={`session-list-profile-${s.id}`}
+                                className="shrink-0 rounded-full bg-[var(--app-secondary-bg)] px-1.5 py-0.5 text-[10px] text-[var(--app-hint)]"
+                            >
+                                {s.metadata.codexProfile}
+                            </span>
+                        ) : null}
                         {s.active && s.thinking ? (
                             <LoaderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-hint)] animate-spin-slow" />
                         ) : attention ? (

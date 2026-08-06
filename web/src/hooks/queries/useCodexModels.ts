@@ -9,6 +9,7 @@ export function useCodexModels(args: {
     enabled?: boolean
 }): {
     models: CodexModelSummary[]
+    profiles: string[]
     isLoading: boolean
     error: string | null
 } {
@@ -34,6 +35,7 @@ export function useCodexModels(args: {
 
     return {
         models: query.data?.models ?? [],
+        profiles: query.data?.profiles ?? [],
         isLoading: query.isLoading,
         error: query.data?.success === false
             ? (query.data.error ?? 'Failed to load Codex models')

@@ -1,12 +1,37 @@
 import type { CodexModelsResponse, CodexModelSummary } from '@hapi/protocol/apiTypes';
 import { CodexAppServerClient } from '@/codex/codexAppServerClient';
 import { getErrorMessage } from './rpcResponses';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 export interface ListCodexModelsRequest {
     includeHidden?: boolean;
 }
 
 export type ListCodexModelsResponse = CodexModelsResponse;
+
+export function listCodexProfiles(codexHome = process.env.CODEX_HOME || join(homedir(), '.codex')): string[] {
+    const profiles = new Set<string>();
+
+    if (existsSync(codexHome)) {
+        for (const entry of readdirSync(codexHome, { withFileTypes: true })) {
+            if (!entry.isFile() || !entry.name.endsWith('.config.toml')) continue;
+            const name = entry.name.slice(0, -'.config.toml'.length).trim();
+            if (name) profiles.add(name);
+        }
+    }
+
+    const mainConfigPath = join(codexHome, 'config.toml');
+    if (existsSync(mainConfigPath)) {
+        for (const rawLine of readFileSync(mainConfigPath, 'utf8').split(/\r?\n/)) {
+            const match = rawLine.trim().match(/^\[profiles\.([A-Za-z0-9_.-]+)\]$/);
+            if (match?.[1]) profiles.add(match[1]);
+        }
+    }
+
+    return [...profiles].sort((a, b) => a.localeCompare(b));
+}
 
 function asNonEmptyString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;

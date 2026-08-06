@@ -13,6 +13,9 @@ const mocks = vi.hoisted(() => ({
     spawnSession: vi.fn(),
     onSuccess: vi.fn(),
     notification: vi.fn(),
+    getCodexSessions: vi.fn(),
+    syncCodexSession: vi.fn(),
+    resumeSession: vi.fn(),
     codexModelsLoading: false,
     directoryExists: undefined as boolean | undefined
 }))
@@ -69,6 +72,7 @@ vi.mock('@/hooks/queries/useCodexModels', () => ({
                 supportedReasoningEfforts: ['low', 'high', 'max']
             }
         ],
+        profiles: ['glm', 'tokenmax'],
         isLoading: mocks.codexModelsLoading,
         error: null
     })
@@ -105,7 +109,15 @@ vi.mock('../../utils/formatRunnerSpawnError', () => ({
     formatRunnerSpawnError: () => null
 }))
 vi.mock('@/components/CodexSessionSyncDialog', () => ({
-    CodexSessionSyncDialog: () => null
+    CodexSessionSyncDialog: (props: {
+        isOpen: boolean
+        sessions: Array<{ id: string; title: string; cwd?: string | null }>
+        onSelectOnly?: (session: { id: string; title: string; cwd?: string | null }) => void
+    }) => props.isOpen && props.sessions[0] ? (
+        <button type="button" data-testid="select-history" onClick={() => props.onSelectOnly?.(props.sessions[0])}>
+            select history
+        </button>
+    ) : null
 }))
 vi.mock('./DirectorySection', () => ({ DirectorySection: () => null }))
 vi.mock('./MachineSelector', () => ({ MachineSelector: () => null }))
@@ -143,7 +155,12 @@ vi.mock('./ActionButtons', () => ({
 import { NewSession } from './index'
 
 const machine = { id: 'machine-1' } as Machine
-const api = {} as ApiClient
+const api = {
+    getCodexSessions: mocks.getCodexSessions,
+    syncCodexSession: mocks.syncCodexSession,
+    resumeSession: mocks.resumeSession,
+    archiveCodexSession: vi.fn()
+} as unknown as ApiClient
 
 describe('NewSession launch preferences', () => {
     beforeEach(() => {
@@ -152,6 +169,9 @@ describe('NewSession launch preferences', () => {
         mocks.spawnSession.mockReset()
         mocks.onSuccess.mockReset()
         mocks.notification.mockReset()
+        mocks.getCodexSessions.mockReset()
+        mocks.syncCodexSession.mockReset()
+        mocks.resumeSession.mockReset()
         mocks.codexModelsLoading = false
         mocks.directoryExists = true
         savePreferredAgent('codex')
@@ -274,6 +294,71 @@ describe('NewSession launch preferences', () => {
             effort: 'auto',
             modelReasoningEffort: 'max'
         })
+    })
+
+    it('passes a scanned Codex profile when creating a new session', async () => {
+        mocks.spawnSession.mockResolvedValue({ type: 'success', sessionId: 'session-profile' })
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.change(screen.getByLabelText('newSession.codexProfile'), { target: { value: 'tokenmax' } })
+        fireEvent.click(screen.getByTestId('create'))
+
+        await waitFor(() => expect(mocks.spawnSession).toHaveBeenCalledWith(expect.objectContaining({
+            codexProfile: 'tokenmax'
+        })))
+    })
+
+    it('stores the selected profile before resuming an imported Codex history session', async () => {
+        mocks.getCodexSessions.mockResolvedValue({
+            success: true,
+            machineId: 'machine-1',
+            sessions: [{
+                id: 'codex-history-1',
+                title: 'History session',
+                cwd: 'C:\\repo',
+                file: 'transcript.jsonl',
+                modifiedAt: 1
+            }]
+        })
+        mocks.syncCodexSession.mockResolvedValue({
+            success: true,
+            hapiSessionIds: ['hapi-imported-1']
+        })
+        mocks.resumeSession.mockResolvedValue('hapi-imported-1')
+
+        render(
+            <NewSession
+                api={api}
+                machines={[machine]}
+                initialMachineId="machine-1"
+                initialDirectory="C:\\repo"
+                onSuccess={mocks.onSuccess}
+                onCancel={() => {}}
+            />
+        )
+
+        fireEvent.change(screen.getByLabelText('newSession.codexProfile'), { target: { value: 'tokenmax' } })
+        fireEvent.click(screen.getByText('codexSync.newSessionInline.choose'))
+        await waitFor(() => expect(screen.getByTestId('select-history')).toBeInTheDocument())
+        fireEvent.click(screen.getByTestId('select-history'))
+        fireEvent.click(screen.getByTestId('create'))
+
+        await waitFor(() => expect(mocks.syncCodexSession).toHaveBeenCalledWith(expect.objectContaining({
+            sessionIds: ['codex-history-1'],
+            codexProfile: 'tokenmax'
+        })))
+        expect(mocks.resumeSession).toHaveBeenCalledWith('hapi-imported-1', undefined)
+        expect(mocks.onSuccess).toHaveBeenCalledWith('hapi-imported-1')
     })
 
     it('does not save changed launch settings when creation fails', async () => {

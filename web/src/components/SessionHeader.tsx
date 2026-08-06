@@ -110,6 +110,7 @@ export function SessionHeader(props: {
     const worktreeBranch = session.metadata?.worktree?.branch
     const modelLabel = getSessionModelLabel(session)
     const agentFlavor = session.metadata?.flavor ?? null
+    const codexProfile = agentFlavor === 'codex' ? session.metadata?.codexProfile?.trim() : undefined
     const reasoningLabel = shouldShowCodexReasoningLabel(agentFlavor)
         ? formatCodexReasoningLabel(session.modelReasoningEffort)
         : null
@@ -245,6 +246,11 @@ export function SessionHeader(props: {
                             {modelLabel ? (
                                 <span>
                                     {t(modelLabel.key)}: {modelLabel.value}
+                                </span>
+                            ) : null}
+                            {codexProfile ? (
+                                <span data-testid="session-header-profile">
+                                    {t('session.profile')}: {codexProfile}
                                 </span>
                             ) : null}
                             {reasoningLabel ? (

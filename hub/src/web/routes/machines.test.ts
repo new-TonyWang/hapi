@@ -26,6 +26,45 @@ function createMachine(overrides?: Partial<Machine>): Machine {
 }
 
 describe('machines routes', () => {
+    it('forwards a selected Codex profile when spawning', async () => {
+        const machine = createMachine()
+        let capturedCodexProfile: string | undefined
+        const engine = {
+            getMachine: () => machine,
+            getMachineByNamespace: () => machine,
+            spawnSession: async (
+                _machineId: string,
+                _directory: string,
+                _agent?: string,
+                _model?: string,
+                _modelReasoningEffort?: string,
+                codexProfile?: string
+            ) => {
+                capturedCodexProfile = codexProfile
+                return { type: 'success' as const, sessionId: 'session-profile' }
+            }
+        } as Partial<SyncEngine>
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createMachinesRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/machines/machine-1/spawn', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                directory: '/tmp/project',
+                agent: 'codex',
+                codexProfile: 'tokenmax'
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(capturedCodexProfile).toBe('tokenmax')
+    })
+
     it('forwards Grok Auto permission mode when spawning', async () => {
         const machine = createMachine()
         let capturedPermissionMode: string | undefined
@@ -38,6 +77,8 @@ describe('machines routes', () => {
                 _agent?: string,
                 _model?: string,
                 _modelReasoningEffort?: string,
+                _codexProfile?: string,
+                _codexProvider?: string,
                 _yolo?: boolean,
                 _sessionType?: string,
                 _worktreeName?: string,
