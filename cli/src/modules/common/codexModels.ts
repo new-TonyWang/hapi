@@ -40,12 +40,12 @@ export function listCodexProviders(codexHome = process.env.CODEX_HOME || join(ho
     const mainConfigPath = join(codexHome, 'config.toml')
     if (existsSync(mainConfigPath)) {
         for (const rawLine of readFileSync(mainConfigPath, 'utf8').split(/\r?\n/)) {
-            const header = rawLine.trim().match(/^\[model_providers\.([A-Za-z0-9_.-]+)\]$/)
-            if (header?.[1]) add(header[1])
+            const header = rawLine.trim().match(/^\[model_providers\.(?:"([^"]+)"|([A-Za-z0-9_.-]+))\]$/)
+            if (header) add(header[1] ?? header[2])
         }
     }
     for (const entry of readdirSync(codexHome, { withFileTypes: true })) {
-        if (!entry.isFile() || !entry.name.endsWith('.config.toml')) continue
+        if (!entry.isFile() || !entry.name.endsWith('.toml')) continue
         for (const rawLine of readFileSync(join(codexHome, entry.name), 'utf8').split(/\r?\n/)) {
             const match = rawLine.trim().match(/^model_provider\s*=\s*["']([^"']+)["']/)
             if (match?.[1]) add(match[1])
