@@ -218,3 +218,29 @@ describe('SessionCache.applySessionPatch', () => {
         expect(applied).toBe(false)
     })
 })
+
+describe('SessionCache.setCodexProvider', () => {
+    it('clears a provider-bearing profile when selecting the default provider', () => {
+        const store = new Store(':memory:')
+        const cache = new SessionCache(store, createPublisher([]))
+        const created = cache.getOrCreateSession(
+            'default-provider-session',
+            {
+                path: '/tmp',
+                host: 'h',
+                flavor: 'codex',
+                codexProfile: 'xubao',
+                codexProvider: 'xubao'
+            },
+            null,
+            'default'
+        )
+
+        cache.setCodexProvider(created.id, '')
+
+        expect(cache.getSession(created.id)?.metadata).toMatchObject({
+            codexProfile: '',
+            codexProvider: ''
+        })
+    })
+})

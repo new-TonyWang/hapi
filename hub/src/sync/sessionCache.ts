@@ -849,15 +849,25 @@ export class SessionCache {
         throw new Error('Session was modified concurrently. Please try again.')
     }
 
-    /** Persist the Codex provider; empty string is the explicit default-provider sentinel. */
+    /**
+     * Persist the Codex provider. Empty string is the explicit default-provider
+     * sentinel and must also clear the profile: a profile may itself set
+     * `model_provider`, which would otherwise silently restore the old provider
+     * when the session resumes.
+     */
     setCodexProvider(sessionId: string, provider: string): void {
         for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
             const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
             if (!session?.metadata) throw new Error('Session metadata unavailable')
-            if (session.metadata.codexProvider === provider) return
+            const clearProfile = provider === '' && session.metadata.codexProfile !== ''
+            if (session.metadata.codexProvider === provider && !clearProfile) return
             const result = this.store.sessions.updateSessionMetadata(
                 sessionId,
-                { ...session.metadata, codexProvider: provider },
+                {
+                    ...session.metadata,
+                    codexProvider: provider,
+                    ...(provider === '' ? { codexProfile: '' } : {})
+                },
                 session.metadataVersion,
                 session.namespace,
                 { touchUpdatedAt: false }
