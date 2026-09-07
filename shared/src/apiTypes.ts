@@ -618,6 +618,8 @@ export const SpawnSessionRequestSchema = z.object({
     model: z.string().optional(),
     effort: z.string().optional(),
     modelReasoningEffort: z.string().optional(),
+    codexProfile: z.string().trim().min(1).max(255).optional(),
+    codexProvider: z.string().trim().min(1).max(255).optional(),
     yolo: z.boolean().optional(),
     permissionMode: PermissionModeSchema.optional(),
     sessionType: z.enum(['simple', 'worktree']).optional(),
@@ -625,7 +627,10 @@ export const SpawnSessionRequestSchema = z.object({
     serviceTier: z.enum(['fast', 'standard']).optional(),
     collaborationMode: CodexCollaborationModeSchema.optional(),
     copilotAgentMode: CopilotAgentModeSchema.optional(),
-    startingMode: z.enum(['remote', 'pty']).optional()
+    startingMode: z.enum(['remote', 'pty']).optional(),
+    /** Parent HAPI session id (MCP create_session from inside a session).
+     *  Hub validates existence + same namespace + no self/cycle before use. */
+    parentSessionId: z.string().min(1).optional()
 })
 
 export type SpawnSessionRequest = z.infer<typeof SpawnSessionRequestSchema>
@@ -761,6 +766,8 @@ export type CodexModelSummary = {
 export type CodexModelsResponse = {
     success: boolean
     models?: CodexModelSummary[]
+    profiles?: string[]
+    providers?: string[]
     error?: string
 }
 

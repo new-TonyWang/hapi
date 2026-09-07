@@ -178,6 +178,7 @@ export class SessionCache {
         const session: Session = {
             id: stored.id,
             namespace: stored.namespace,
+            parentSessionId: stored.parentSessionId,
             seq: stored.seq,
             createdAt: stored.createdAt,
             updatedAt: stored.updatedAt,
@@ -203,6 +204,10 @@ export class SessionCache {
             teamState,
             todosUpdatedAt: stored.todosUpdatedAt ?? 0,
             teamStateUpdatedAt: stored.teamStateUpdatedAt ?? 0,
+            // Hub-owned human-intake flag; hydrates from the persisted row
+            // and survives metadata/agentState rewrites because no CLI
+            // patch path can set it (only setAutomationPaused below writes).
+            automationPaused: stored.automationPaused,
             model: stored.model,
             modelReasoningEffort: stored.modelReasoningEffort,
             effort: stored.effort,
@@ -233,6 +238,119 @@ export class SessionCache {
         if (!session) throw new Error('Session not found')
         this.store.sessions.setSessionPinMode(sessionId, mode, session.namespace)
         this.refreshSession(sessionId)
+    }
+
+    /**
+     * Persist the Codex model provider to session metadata
+     * (port of 3008's setCodexProvider, adapted to this repo's merge
+     * contract). The provider is trimmed; the empty string is the explicit
+     * default-provider sentinel.
+     *
+     * Empty provider also *removes* codexProfile: a profile may itself set
+     * `model_provider`, which would otherwise silently resurrect the old
+     * provider on resume. The removal uses the store's explicit-clear
+     * sentinel (`codexProfile: null`) — NOT the 3008-style `''` write —
+     * because this repo's mergeSessionMetadata treats CODEX_LAUNCH_FIELDS
+     * with "undefined = carry forward" semantics: a defined-but-empty `''`
+     * survives the merge (it is a value, not an absence), but `null` is the
+     * documented "drop this field" sentinel that cannot be re-carried from
+     * the prior row.
+     *
+     * Non-empty provider: profile is left untouched (3008 parity). A profile
+     * and an explicit provider are independent knobs — the runner's app-server
+     * client resolves the profile's thread config first and then applies the
+     * provider as a `model_provider` override, so an explicit provider
+     * intentionally wins over the profile's provider while the profile still
+     * contributes the rest of its thread config.
+     *
+     * Namespace: this setter has NO namespace parameter and cannot know the
+     * caller's tenant, and refreshSession itself is not namespace-scoped —
+     * it resolves by session id only. Authorization is therefore entirely
+     * the callers' job: routes go through requireSessionFromParam and the
+     * engine through resolveSessionAccess before reaching this method. The
+     * setter's own responsibility is persistence consistency: the store
+     * UPDATE writes with the row's own namespace (taken from the resolved
+     * session), so the write can never cross rows. It does not re-check
+     * who asked.
+     *
+     * CAS retry: metadataVersion is compare-and-swapped; version-mismatch
+     * retries up to METADATA_RETRY_ATTEMPTS after refreshing the snapshot.
+     * Store errors and exhausted retries throw (never silently succeed).
+     * On success the session is refreshed (full session-updated broadcast
+     * carries the new metadata downstream).
+     */
+    setCodexProvider(sessionId: string, provider: string): void {
+        const trimmed = provider.trim()
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) throw new Error('Session not found')
+            if (!session.metadata) throw new Error('Session metadata unavailable')
+
+            const clearProfile = trimmed === '' && session.metadata.codexProfile !== undefined
+            if (session.metadata.codexProvider === trimmed && !clearProfile) return
+
+            const next: Record<string, unknown> = {
+                ...session.metadata,
+                codexProvider: trimmed,
+                ...(trimmed === '' ? { codexProfile: null } : {})
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to update Codex provider')
+            }
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+            // version-mismatch: refresh and retry with the current snapshot.
+            this.refreshSession(sessionId)
+        }
+        throw new Error('Session was modified concurrently while changing provider')
+    }
+
+    /**
+     * Set the human-interrupt flag. Namespace is resolved from the cached
+     * session (never caller-supplied) so a cross-namespace caller cannot
+     * touch another namespace's flag — the store UPDATE's namespace guard
+     * then matches the row's own namespace by construction. Persists first,
+     * then syncs the cached Session in place and broadcasts a structured
+     * `session-updated` patch (same channel every other status flag uses).
+     * Returns the effective session, or null when the session is unknown
+     * (store returned no rows — nothing was written).
+     */
+    setAutomationPaused(sessionId: string, paused: boolean): Session | null {
+        const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+        if (!session) {
+            return null
+        }
+
+        const updated = this.store.sessions.setSessionAutomationPaused(sessionId, paused, session.namespace)
+        if (!updated) {
+            return null
+        }
+
+        // In-place update + structured patch (not refreshSession): a full
+        // re-read would rebuild the Session object and re-broadcast the
+        // whole row; the flag is server-owned so a one-field patch is the
+        // minimal, order-safe update for SSE clients.
+        session.automationPaused = updated.automationPaused
+        session.updatedAt = Math.max(session.updatedAt, updated.updatedAt)
+        session.seq = updated.seq
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId,
+            namespace: session.namespace,
+            data: { automationPaused: updated.automationPaused } satisfies SessionPatch
+        })
+        return session
     }
 
     markSessionActive(sessionId: string, time: number = Date.now()): void {
@@ -294,6 +412,19 @@ export class SessionCache {
         // coherent.
         if (Object.keys(parsed.data).length === 0) {
             return false
+        }
+
+        // automationPaused is server-owned: strip it before applying so a
+        // client-shaped patch carrying the key (e.g. a CLI echoing back an
+        // older hub broadcast) can never clear or set the flag — only
+        // setAutomationPaused's own emit path writes it to the cache. If the
+        // patch carried nothing else, fall back to refresh like the empty-
+        // patch case so the event is not forwarded as a no-op.
+        if ('automationPaused' in parsed.data) {
+            delete parsed.data.automationPaused
+            if (Object.keys(parsed.data).length === 0) {
+                return false
+            }
         }
 
         const session = this.sessions.get(sessionId)
@@ -1062,9 +1193,23 @@ export class SessionCache {
             .list(sessionId)
             .flatMap((entry) => entry.attachments)
 
+        // Snapshot children BEFORE the store delete clears their parent links,
+        // so their in-memory cache rows can be refreshed right after.
+        const childIds = this.store.sessions
+            .getSessionChildren(sessionId, session.namespace)
+            .map((child) => child.id)
+
         const deleted = this.store.sessions.deleteSession(sessionId, session.namespace)
         if (!deleted) {
             throw new Error('Failed to delete session')
+        }
+
+        // The store layer cleared children's parent links (dangling parent ids
+        // make the UI jump orphans between directory groups); refresh every
+        // child row that referenced this session so the in-memory cache and
+        // the next sessions broadcast carry the detached state immediately.
+        for (const childId of childIds) {
+            this.refreshSession(childId)
         }
 
         this.sessions.delete(sessionId)

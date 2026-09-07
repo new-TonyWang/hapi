@@ -28,6 +28,8 @@ import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { selectMobileSessionHeaderSecondary } from '@/lib/sessionHeaderMobileMetadata'
 import { useMinuteTick } from '@/hooks/useMinuteTick'
 import { markSessionUnread } from '@/lib/sessionLastSeen'
+import { useCodexModels } from '@/hooks/queries/useCodexModels'
+import { ChangeCodexProviderDialog } from '@/components/ChangeCodexProviderDialog'
 
 /** Same preference order as session-list chips: display label → host → short id. */
 export function resolveSessionHeaderMachineLabel(
@@ -167,6 +169,8 @@ export function SessionHeader(props: {
         exact: true,
     }) > 0
     const agentFlavor = session.metadata?.flavor ?? null
+    const codexProfile = agentFlavor === 'codex' ? session.metadata?.codexProfile?.trim() : undefined
+    const codexProvider = agentFlavor === 'codex' ? session.metadata?.codexProvider?.trim() : undefined
     const agentLabel = agentFlavor?.trim() || null
     const reasoningEffort = getReasoningEffortForFlavor(
         agentFlavor,
@@ -211,7 +215,10 @@ export function SessionHeader(props: {
         worktree: headerMetadata.worktree && Boolean(worktreeBranch),
         fastMode: headerMetadata.fastMode && showFastBadge,
     })
-    const showMobileMetadata = (headerMetadata.agent && agentLabel !== null) || mobileSecondary !== null
+    const showMobileMetadata = (headerMetadata.agent && agentLabel !== null)
+        || mobileSecondary !== null
+        || Boolean(codexProfile)
+        || Boolean(codexProvider)
 
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -223,12 +230,21 @@ export function SessionHeader(props: {
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [isSyncingCodex, setIsSyncingCodex] = useState(false)
     const [isSyncingPi, setIsSyncingPi] = useState(false)
+    const [changeProviderOpen, setChangeProviderOpen] = useState(false)
 
-    const { archiveSession, reopenSession, renameSession, suggestSessionTitle, updateSessionSummary, setPinMode, deleteSession, isPending } = useSessionActions(
+    const { archiveSession, reopenSession, renameSession, suggestSessionTitle, updateSessionSummary, setPinMode, deleteSession, setCodexProvider, isPending } = useSessionActions(
         api,
         session.id,
         session.metadata?.flavor ?? null
     )
+    // Provider list for the change-provider dialog: reuse Codex model
+    // discovery on the session's machine (same source as New Session).
+    const { providers: codexProviders } = useCodexModels({
+        api,
+        sessionId: session.id,
+        machineId: typeof session.metadata?.machineId === 'string' ? session.metadata.machineId : null,
+        enabled: agentFlavor === 'codex'
+    })
     const [reopenError, setReopenError] = useState<string | null>(null)
 
     const handleSetPinMode = async (mode: 'none' | 'project' | 'global') => {
@@ -405,6 +421,16 @@ export function SessionHeader(props: {
                                         {agentLabel}
                                     </span>
                                 ) : null}
+                                {codexProfile ? (
+                                    <span data-testid="session-header-profile-mobile" className="shrink-0 truncate">
+                                        {t('session.profile')}: {codexProfile}
+                                    </span>
+                                ) : null}
+                                {codexProvider ? (
+                                    <span data-testid="session-header-provider-mobile" className="shrink-0 truncate">
+                                        {t('session.provider')}: {codexProvider}
+                                    </span>
+                                ) : null}
                                 {mobileSecondary === 'model' && modelLabel ? <span className="inline-flex truncate items-center gap-1.5">{headerMetadata.showLabels ? `${t(modelLabel.key)}: ` : ''}{modelLabel.value}{isModelChanging ? <ModelChangingStatus /> : null}</span> : null}
                                 {mobileSecondary === 'reasoning' && reasoningLabel ? <span className="truncate">{reasoningLabel}</span> : null}
                                 {mobileSecondary === 'machine' && machineLabel ? <span className="truncate">{headerMetadata.showLabels ? `${t('session.item.machine')}: ` : ''}{machineLabel}</span> : null}
@@ -420,6 +446,16 @@ export function SessionHeader(props: {
                                 <span className="inline-flex items-center gap-1">
                                     <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0 -translate-y-px" />
                                     {agentLabel}
+                                </span>
+                            ) : null}
+                            {codexProfile ? (
+                                <span data-testid="session-header-profile">
+                                    {t('session.profile')}: {codexProfile}
+                                </span>
+                            ) : null}
+                            {codexProvider ? (
+                                <span data-testid="session-header-provider">
+                                    {t('session.provider')}: {codexProvider}
                                 </span>
                             ) : null}
                             {headerMetadata.machine && machineLabel ? (
@@ -525,6 +561,7 @@ export function SessionHeader(props: {
                 onExport={() => setExportOpen(true)}
                 onSyncCodex={api && codexSessionId ? handleSyncCodex : undefined}
                 onSyncPi={api && piSessionId && !session.active ? handleSyncPi : undefined}
+                onChangeCodexProvider={api && agentFlavor === 'codex' ? () => setChangeProviderOpen(true) : undefined}
                 onArchive={() => setArchiveOpen(true)}
                 onReopen={props.canReopen === false ? undefined : handleReopen}
                 reopenDisabledReason={props.reopenDisabledReason}
@@ -564,6 +601,17 @@ export function SessionHeader(props: {
                 sessionId={session.id}
                 api={api}
             />
+
+            {agentFlavor === 'codex' ? (
+                <ChangeCodexProviderDialog
+                    isOpen={changeProviderOpen}
+                    onClose={() => setChangeProviderOpen(false)}
+                    currentProvider={codexProvider}
+                    providers={codexProviders}
+                    onChange={setCodexProvider}
+                    isPending={isPending}
+                />
+            ) : null}
 
             <ConfirmDialog
                 isOpen={archiveOpen}

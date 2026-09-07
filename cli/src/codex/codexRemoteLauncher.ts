@@ -19,8 +19,11 @@ import { registerAppServerPermissionHandlers } from './utils/appServerPermission
 import {
     buildThreadStartParams,
     buildTurnStartParams,
-    type CodexContextManagementConfig
+    type CodexContextManagementConfig,
+    type ResolvedCodexProfile
 } from './utils/appServerConfig';
+import { resolveCodexProfileConfig } from './codexProfileConfig';
+import type { ResolveProfileConfigResult } from './resolveProfileConfig';
 import type { SkillMetadata, ThreadGoal, ThreadGoalStatus } from './appServerTypes';
 import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
@@ -244,7 +247,39 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     constructor(session: CodexSession) {
         super(process.env.DEBUG ? session.logPath : undefined);
         this.session = session;
+        // Profile/provider are applied via JSON-RPC thread params, not argv:
+        // upstream Codex rejects `--profile` for app-server and `-c profile=`
+        // is a deprecated legacy selector. Resolution stays runner-local.
         this.appServerClient = new CodexAppServerClient();
+        const outcome = resolveCodexProfileConfig(
+            session.codexProfile,
+            session.codexProvider
+        );
+        this.resolvedProfile = outcome.profile;
+        this.explicitProvider = outcome.provider;
+    }
+
+    /** Resolved profile for thread params; null when no profile is set. */
+    private readonly resolvedProfile: ResolveProfileConfigResult | null;
+
+    /** Explicit provider independent of any profile (provider-only path). */
+    private readonly explicitProvider: string | undefined;
+
+    /** Profile config for buildThreadStartParams; undefined when unresolved. */
+    private get profileConfig(): ResolvedCodexProfile | undefined {
+        return this.resolvedProfile?.ok ? this.resolvedProfile : undefined;
+    }
+
+    /**
+     * A profile that failed to resolve (invalid name, broken file, not
+     * found) must abort startup — continuing on the default config would
+     * silently misroute the session. Checked at the top of runMainLoop so
+     * the failure surfaces through the normal error/teardown path.
+     */
+    private assertProfileResolved(): void {
+        if (this.resolvedProfile && !this.resolvedProfile.ok) {
+            throw new Error(this.resolvedProfile.message);
+        }
     }
 
     protected createDisplay(context: RemoteLauncherDisplayContext): React.ReactElement {
@@ -353,6 +388,11 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
     }
 
     protected async runMainLoop(): Promise<void> {
+        // Fail fast on an unresolvable profile before any thread is started:
+        // surfacing the error (profile names only, never config contents)
+        // beats silently launching on the default configuration.
+        this.assertProfileResolved();
+
         const session = this.session;
         const messageBuffer = this.messageBuffer;
         const appServerClient = this.appServerClient;
@@ -3746,7 +3786,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 mode,
                 mcpServers,
                 cliOverrides: session.codexCliOverrides,
-                contextManagementConfig
+                contextManagementConfig,
+                profileConfig: this.profileConfig,
+                modelProvider: this.explicitProvider
             });
 
             try {
@@ -3812,7 +3854,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     mode,
                     mcpServers,
                     cliOverrides: session.codexCliOverrides,
-                    contextManagementConfig
+                    contextManagementConfig,
+                    profileConfig: this.profileConfig,
+                    modelProvider: this.explicitProvider
                 });
                 try {
                     const resumeResponse = await appServerClient.resumeThread({
@@ -3844,7 +3888,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     mode,
                     mcpServers,
                     cliOverrides: session.codexCliOverrides,
-                    contextManagementConfig
+                    contextManagementConfig,
+                    profileConfig: this.profileConfig,
+                    modelProvider: this.explicitProvider
                 });
                 const threadResponse = await appServerClient.startThread({
                     ...threadParams,
@@ -4096,7 +4142,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         mode: message.mode,
                         mcpServers,
                         cliOverrides: session.codexCliOverrides,
-                        contextManagementConfig
+                        contextManagementConfig,
+                        profileConfig: this.profileConfig,
+                        modelProvider: this.explicitProvider
                     });
 
                     const resumeCandidate = session.sessionId ?? null;

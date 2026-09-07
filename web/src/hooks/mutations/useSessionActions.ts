@@ -26,6 +26,9 @@ export function useSessionActions(
     setModelReasoningEffort: (modelReasoningEffort: string | null) => Promise<void>
     setEffort: (effort: string | null) => Promise<void>
     setServiceTier: (serviceTier: string | null) => Promise<void>
+    setCodexProvider: (provider: string | null) => Promise<void>
+    stopAutomation: () => Promise<{ wasRunning: boolean }>
+    resumeAutomation: () => Promise<void>
     renameSession: (name: string) => Promise<void>
     suggestSessionTitle: () => Promise<string>
     updateSessionSummary: (text: string) => Promise<void>
@@ -227,6 +230,37 @@ export function useSessionActions(
         onSuccess: () => void invalidateSession(),
     })
 
+    const codexProviderMutation = useMutation({
+        mutationFn: async (provider: string | null) => {
+            if (!api || !sessionId) throw new Error('Session unavailable')
+            if (agentFlavor !== 'codex') throw new Error('Provider selection is only supported for Codex sessions')
+            // Empty string restores the default provider (hub clears
+            // provider and profile); the session restarts with the change.
+            await api.setCodexProvider(sessionId, provider ?? '')
+        },
+        onSuccess: () => void invalidateSession(),
+    })
+
+    // Hub-ordered stop: pause persists first, then abort only if running.
+    const stopAutomationMutation = useMutation({
+        mutationFn: async () => {
+            if (!api || !sessionId) throw new Error('Session unavailable')
+            return await api.stopAutomation(sessionId)
+        },
+        onSuccess: () => void invalidateSession(),
+    })
+
+    // Explicit resume: clears the human-interrupt flag. No other action
+    // resumes implicitly — the hub keeps rejecting automation sends until
+    // this runs (human sends still pass through /messages).
+    const resumeAutomationMutation = useMutation({
+        mutationFn: async () => {
+            if (!api || !sessionId) throw new Error('Session unavailable')
+            await api.resumeAutomation(sessionId)
+        },
+        onSuccess: () => void invalidateSession(),
+    })
+
     const renameMutation = useMutation({
         mutationFn: async (name: string) => {
             if (!api || !sessionId) {
@@ -292,6 +326,9 @@ export function useSessionActions(
         setModelReasoningEffort: modelReasoningEffortMutation.mutateAsync,
         setEffort: effortMutation.mutateAsync,
         setServiceTier: serviceTierMutation.mutateAsync,
+        setCodexProvider: codexProviderMutation.mutateAsync,
+        stopAutomation: stopAutomationMutation.mutateAsync,
+        resumeAutomation: resumeAutomationMutation.mutateAsync,
         renameSession: renameMutation.mutateAsync,
         suggestSessionTitle: titleSuggestionMutation.mutateAsync,
         updateSessionSummary: summaryMutation.mutateAsync,

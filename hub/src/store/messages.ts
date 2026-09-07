@@ -328,6 +328,60 @@ export function getMessagesAfterSeq(
     return rows.map(toStoredMessage)
 }
 
+/**
+ * Bounded automation-output cursor for the MCP bridge (GET /api/sessions/:id/automation/output).
+ *
+ * Semantics: all rows with seq > afterSeq in ascending seq order, at most
+ * `limit` of them — the SQL LIMIT does the bounding, so we never read the
+ * full history and slice. afterSeq = 0 returns the oldest `limit` rows
+ * (ascending); callers page by advancing the cursor to the last seq seen.
+ * Gaps in the seq sequence (deleted rows) are simply skipped — the cursor is
+ * a seq watermark, not a position. unordered created_at is irrelevant: seq is
+ * the insert order, so late-timestamped rows are still returned in seq order
+ * and never lost.
+ */
+export function getMessagesAfterSeqLimit(
+    db: Database,
+    sessionId: string,
+    afterSeq: number,
+    limit: number
+): StoredMessage[] {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(200, limit)) : 200
+    const safeAfterSeq = Number.isFinite(afterSeq) ? Math.max(0, Math.floor(afterSeq)) : 0
+
+    const rows = db.prepare(`
+        SELECT * FROM messages
+        WHERE session_id = ? AND seq > ?
+        ORDER BY seq ASC
+        LIMIT ?
+    `).all(sessionId, safeAfterSeq, safeLimit) as DbMessageRow[]
+
+    return rows.map(toStoredMessage)
+}
+
+/**
+ * Bounded automation-output tail for the MCP bridge: the newest `limit` rows
+ * by seq, re-ordered ascending. SQL-bounded (ORDER BY seq DESC LIMIT, then
+ * reversed) — never read-all-then-slice, and never ordered by created_at
+ * (seq is the insert order; created_at may be out of order).
+ */
+export function getMessagesLastBySeqLimit(
+    db: Database,
+    sessionId: string,
+    limit: number
+): StoredMessage[] {
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(200, limit)) : 200
+
+    const rows = db.prepare(`
+        SELECT * FROM messages
+        WHERE session_id = ?
+        ORDER BY seq DESC
+        LIMIT ?
+    `).all(sessionId, safeLimit) as DbMessageRow[]
+
+    return rows.reverse().map(toStoredMessage)
+}
+
 /** Current seq for a message that still lives on this session (merge-stable id). */
 export function getMessageSeqById(
     db: Database,

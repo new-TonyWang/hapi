@@ -18,6 +18,20 @@ export type CodexContextManagementConfig = {
     modelAutoCompactTokenLimit?: number;
 };
 
+/**
+ * Resolved Codex profile applied through the app-server JSON-RPC `config`
+ * and `modelProvider` fields (never argv / -p / -c profile=). Keys already
+ * set by HAPI (MCP servers, developer instructions, reasoning effort,
+ * context management) take precedence over profile keys, so a profile can
+ * only fill in defaults, not override explicit session choices. The
+ * resolved object already carries the explicit provider as its
+ * `model_provider` when one was given (see resolveProfileConfig).
+ */
+export type ResolvedCodexProfile = {
+    source: 'external' | 'legacy';
+    config: Record<string, unknown>;
+};
+
 export const codexCollaborationSpawnAgentInstructions = [
     'Codex sub-agent spawning rules:',
     '- Treat omitted fork_context the same as fork_context: true: a full-history fork inherits the parent agent type, model, and reasoning effort.',
@@ -202,6 +216,12 @@ export function buildThreadStartParams(args: {
     baseInstructions?: string;
     developerInstructions?: string;
     contextManagementConfig?: CodexContextManagementConfig;
+    profileConfig?: ResolvedCodexProfile;
+    /**
+     * Explicit provider, independent of any profile (provider-only sessions
+     * have no profile). Takes precedence over the profile's model_provider.
+     */
+    modelProvider?: string;
 }): ThreadStartParams {
     const approvalPolicy = resolveApprovalPolicy(args.mode);
     const sandbox = resolveSandbox(args.mode);
@@ -215,7 +235,10 @@ export function buildThreadStartParams(args: {
         baseInstructions,
         developerInstructions: resolvedDeveloperInstructions
     } = resolveInstructions(args);
+    // Profile keys are the base layer; HAPI-owned keys above override them so
+    // a profile fills defaults only (explicit session choices always win).
     const configWithInstructions = {
+        ...args.profileConfig?.config,
         ...config,
         developer_instructions: resolvedDeveloperInstructions,
         ...(args.mode.modelReasoningEffort ? { model_reasoning_effort: args.mode.modelReasoningEffort } : {}),
@@ -235,6 +258,20 @@ export function buildThreadStartParams(args: {
         developerInstructions: resolvedDeveloperInstructions,
         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
     };
+
+    // Provider precedence: explicit modelProvider (works without any
+    // profile) > the resolved profile config's model_provider. The profile
+    // config already folded an explicit provider into model_provider when
+    // one was given at resolve time, so reading it back covers both paths.
+    const modelProvider = args.modelProvider !== undefined && args.modelProvider.trim().length > 0
+        ? args.modelProvider.trim()
+        : (typeof args.profileConfig?.config.model_provider === 'string'
+            && args.profileConfig.config.model_provider.trim().length > 0
+            ? args.profileConfig.config.model_provider as string
+            : undefined);
+    if (modelProvider !== undefined) {
+        params.modelProvider = modelProvider;
+    }
 
     if (args.mode.model) {
         params.model = args.mode.model;

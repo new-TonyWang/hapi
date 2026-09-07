@@ -580,6 +580,31 @@ export class ApiClient {
         })
     }
 
+    /**
+     * Human stop: the hub persists the automation pause first (blocking
+     * automation-origin sends), then aborts the running turn — one ordered
+     * call. `wasRunning=false` means the session was already idle but the
+     * pause is still persisted.
+     */
+    async stopAutomation(sessionId: string): Promise<{ wasRunning: boolean }> {
+        return await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/stop-automation`, {
+            method: 'POST',
+            body: JSON.stringify({})
+        })
+    }
+
+    /**
+     * Explicit resume: clears the human-interrupt flag. Nothing else resumes
+     * implicitly — the composer keeps posting to /messages and the hub keeps
+     * rejecting automation sends until this is called.
+     */
+    async resumeAutomation(sessionId: string): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/resume-automation`, {
+            method: 'POST',
+            body: JSON.stringify({})
+        })
+    }
+
     async forkConversation(sessionId: string, messageLocalId?: string): Promise<{ sessionId: string }> {
         return await this.request<{ sessionId: string }>(
             `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
@@ -711,6 +736,18 @@ export class ApiClient {
         })
     }
 
+    /**
+     * Change the Codex provider of a running session. An empty string
+     * restores the default provider; the hub clears the stored provider
+     * (and profile) and restarts the session with the new selection.
+     */
+    async setCodexProvider(sessionId: string, provider: string): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/codex-provider`, {
+            method: 'POST',
+            body: JSON.stringify({ provider })
+        })
+    }
+
     async approvePermission(
         sessionId: string,
         requestId: string,
@@ -835,7 +872,9 @@ export class ApiClient {
         serviceTier?: 'fast' | 'standard',
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty'
+        startingMode?: 'remote' | 'pty',
+        codexProfile?: string,
+        codexProvider?: string
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
@@ -852,7 +891,9 @@ export class ApiClient {
                 serviceTier,
                 collaborationMode,
                 copilotAgentMode,
-                startingMode
+                startingMode,
+                codexProfile,
+                codexProvider
             })
         })
     }

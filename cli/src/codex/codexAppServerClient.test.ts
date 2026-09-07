@@ -76,6 +76,22 @@ describe('CodexAppServerClient process cwd', () => {
         await client.disconnect();
     });
 
+    it('spawns the app-server with no profile/provider argv (JSON-RPC config path only)', async () => {
+        spawnMock.mockReturnValue(fakeChild());
+        const client = new CodexAppServerClient({
+            cwd: '/neutral-home'
+        });
+
+        await client.connect();
+
+        expect(spawnMock).toHaveBeenCalledWith(
+            'codex',
+            ['app-server'],
+            expect.objectContaining({ cwd: '/neutral-home' })
+        );
+        await client.disconnect();
+    });
+
     it('steerTurn resolves dispatch on stdin accept and completes with the turn response', async () => {
         const child = fakeChild();
         child.stdin.write = vi.fn((_data: unknown, cb?: (error?: Error | null) => void) => {

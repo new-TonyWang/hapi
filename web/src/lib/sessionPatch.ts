@@ -81,6 +81,9 @@ export function applySessionDetailPatch(session: Session, patch: SessionPatch): 
     if (patch.collaborationMode !== undefined) assign('collaborationMode', patch.collaborationMode)
     if (patch.copilotAgentMode !== undefined) assign('copilotAgentMode', patch.copilotAgentMode)
     if (patch.backgroundTaskCount !== undefined) assign('backgroundTaskCount', patch.backgroundTaskCount)
+    // Human-interrupt flag (pause/resume transitions). Present-means-set —
+    // `undefined` never overwrites, `false` explicitly clears the banner.
+    if (patch.automationPaused !== undefined) assign('automationPaused', patch.automationPaused)
     // Version gates: dual SSE can deliver duplicates out of order.
     // Only mark changed when a strictly newer version lands —
     // otherwise keep previous object identity (no redundant render).

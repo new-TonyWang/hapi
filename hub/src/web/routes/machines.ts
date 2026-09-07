@@ -98,6 +98,17 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
         const startingMode = parsed.data.startingMode
 
+        // Parent-link pre-check at the route layer (caller's namespace):
+        // the engine re-validates before the RPC and stamps after it, but a
+        // missing/cross-namespace parent is a pure 4xx here — cheaper and
+        // clearer than surfacing it as a spawn error payload.
+        if (parsed.data.parentSessionId !== undefined) {
+            const parentAccess = engine.resolveSessionAccess(parsed.data.parentSessionId, c.get('namespace'))
+            if (!parentAccess.ok) {
+                return c.json({ error: 'Parent session not found' }, 404)
+            }
+        }
+
         const result = await engine.spawnSession(
             machineId,
             parsed.data.directory,
@@ -114,7 +125,10 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             undefined,
             parsed.data.collaborationMode,
             parsed.data.copilotAgentMode,
-            startingMode
+            startingMode,
+            parsed.data.codexProfile,
+            parsed.data.codexProvider,
+            parsed.data.parentSessionId
         )
         return c.json(result)
     })

@@ -348,6 +348,77 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
     })
 
+    // Human "stop": persist the pause first (in-flight/queued automation
+    // sends get rejected server-side), then abort the running turn. An
+    // already-idle session skips the abort RPC and reports wasRunning=false.
+    // Callable on inactive/idle sessions (no requireActive); the pause is
+    // still persisted. Real failures propagate as 500 — never swallowed.
+    app.post('/sessions/:id/stop-automation', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        try {
+            const result = await engine.stopAutomation(sessionResult.sessionId)
+            return c.json({
+                ok: true,
+                automationPaused: result.automationPaused,
+                wasRunning: result.wasRunning
+            })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to stop automation'
+            return c.json({ error: message }, 500)
+        }
+    })
+
+    // Explicit pause without the abort leg. Callable on inactive sessions —
+    // the flag write is ordered against sends via the per-session queue.
+    app.post('/sessions/:id/pause-automation', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const session = await engine.setAutomationPaused(sessionResult.sessionId, true)
+        if (!session) {
+            return c.json({ error: 'Failed to pause automation' }, 500)
+        }
+
+        return c.json({ ok: true, automationPaused: session.automationPaused })
+    })
+
+    // Explicit resume: clears the human-interrupt flag. Nothing else resumes
+    // implicitly — automation sends keep 409ing until this runs.
+    app.post('/sessions/:id/resume-automation', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const session = await engine.setAutomationPaused(sessionResult.sessionId, false)
+        if (!session) {
+            return c.json({ error: 'Failed to resume automation' }, 500)
+        }
+
+        return c.json({ ok: true, automationPaused: session.automationPaused })
+    })
+
     app.post('/sessions/:id/abort', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {

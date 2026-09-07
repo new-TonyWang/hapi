@@ -121,6 +121,26 @@ export type CursorChatStoreStatusResult =
     | { type: 'success'; status: CursorChatStoreStatus }
     | { type: 'error'; message: string; code: 'session_not_found' | 'access_denied' | 'resume_unavailable' | 'no_machine_online' | 'probe_failed' }
 
+/**
+ * Thrown when an automation sender tries to message a session whose human
+ * has taken control (automation-paused). Route layer maps this to a 409
+ * {code: 'automation_paused'} response.
+ */
+export class AutomationPausedError extends Error {
+    readonly sessionId: string
+
+    constructor(sessionId: string) {
+        super('Automation is paused for this session')
+        this.name = 'AutomationPausedError'
+        this.sessionId = sessionId
+    }
+}
+
+export type SendAutomationResult = {
+    automationPaused: boolean
+    wasRunning: boolean
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
     return value !== null && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
@@ -194,8 +214,20 @@ export class SyncEngine {
     private readonly scratchlistUploadTails = new Map<string, Promise<unknown>>()
     /** Coalesce duplicate clear requests so retries cannot spawn two fresh sessions. */
     private readonly opencodeClearTails = new Map<string, Promise<ClearOpencodeSessionResult>>()
+    /** Serialize provider switches per session (archive→persist→reopen); see changeCodexProvider. */
+    private readonly codexProviderSwitchTails = new Map<string, Promise<void>>()
     /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
     private readonly historyActionsInFlight = new Set<string>()
+    /**
+     * Per-session serial queue for the pause-control surface: human
+     * sendMessage, automation sendAutomationMessage, setAutomationPaused and
+     * stopAutomation all enqueue here, so same-session operations run in call
+     * order. In particular a pause can never land between an automation
+     * send's pause check and its insert — both run inside one queue entry —
+     * and a resume/human send issued while stopAutomation's abort RPC is in
+     * flight stays queued behind it instead of racing it.
+     */
+    private readonly automationSessionQueues = new Map<string, Promise<unknown>>()
     /**
      * Hub owner id for accountable work-graph principals (A2A P1/P3).
      * Defaults to "1" for unit tests; startHub overwrites with getOrCreateOwnerId().
@@ -232,6 +264,7 @@ export class SyncEngine {
             clearInterval(this.inactivityTimer)
             this.inactivityTimer = null
         }
+        this.automationSessionQueues.clear()
     }
 
     subscribe(listener: SyncEventListener): () => void {
@@ -340,6 +373,11 @@ export class SyncEngine {
 
     getSession(sessionId: string): Session | undefined {
         return this.sessionCache.getSession(sessionId) ?? this.sessionCache.refreshSession(sessionId) ?? undefined
+    }
+
+    /** Refresh a session snapshot after an external store mutation. */
+    refreshSession(sessionId: string): Session | undefined {
+        return this.sessionCache.refreshSession(sessionId) ?? undefined
     }
 
     getSessionByNamespace(sessionId: string, namespace: string): Session | undefined {
@@ -994,6 +1032,26 @@ export class SyncEngine {
         return this.machineCache.getOrCreateMachine(id, metadata, runnerState, namespace)
     }
 
+    /**
+     * Run `task` strictly ordered with other same-session automation-queue
+     * operations (sendMessage / sendAutomationMessage / setAutomationPaused /
+     * stopAutomation). `task` runs even if the previous entry rejected — the
+     * tail promise passed to the next caller swallows the prior error
+     * (errors surface via each entry's own returned promise).
+     */
+    private enqueueAutomation<T>(sessionId: string, task: () => Promise<T> | T): Promise<T> {
+        const previous = this.automationSessionQueues.get(sessionId) ?? Promise.resolve()
+        const next = previous.then(task, task)
+        this.automationSessionQueues.set(sessionId, next)
+        next.finally(() => {
+            // Drop the tail entry once nothing newer queued behind it
+            if (this.automationSessionQueues.get(sessionId) === next) {
+                this.automationSessionQueues.delete(sessionId)
+            }
+        }).catch(() => { /* errors surface via next */ })
+        return next
+    }
+
     async sendMessage(
         sessionId: string,
         payload: {
@@ -1012,12 +1070,121 @@ export class SyncEngine {
             deliveryMode?: MessageDeliveryMode
         }
     ): Promise<void> {
+        // Pre-queue check: fail fast when a history action is already running.
         if (this.historyActionsInFlight.has(sessionId)) {
             throw new Error('Conversation history action already in progress')
         }
-        const { actualSessionId, createdAt: activeTurnStartedAt } = await this.messageService.sendMessage(sessionId, payload)
-        this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
-        this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
+        // Human-origin send: allowed while automation is paused (the session
+        // is human-controlled by definition) and never implicitly resumes.
+        // The original delivery logic (scheduledAt / deliveryMode / queued
+        // thinking grace) is preserved verbatim inside the queue entry; the
+        // inner body is NOT re-enqueued, so no nested-queue deadlock.
+        await this.enqueueAutomation(sessionId, async () => {
+            // In-queue check: the pre-queue test above cannot see a history
+            // action that starts while this entry is parked behind another
+            // queue operation (e.g. an abort's RPC). The insert must not
+            // interleave with a fork/rewind's truncate-and-replay — the
+            // rows would land at a seq the native conversation does not
+            // have. Re-check inside the queue entry so the send is
+            // rejected instead of racing the rollback.
+            if (this.historyActionsInFlight.has(sessionId)) {
+                throw new Error('Conversation history action already in progress')
+            }
+            const { actualSessionId, createdAt: activeTurnStartedAt } = await this.messageService.sendMessage(sessionId, payload)
+            this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
+            this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
+        })
+    }
+
+    /**
+     * Send a user message from automation (MCP bridge / scheduling logic).
+     * The pause check and the insert run inside ONE queue entry, so a pause
+     * issued while the send is in flight is applied before the check and the
+     * send is rejected with AutomationPausedError (mapped to 409 by the
+     * route layer). Never implicitly resumes.
+     */
+    async sendAutomationMessage(
+        sessionId: string,
+        payload: {
+            text: string
+            localId?: string | null
+            attachments?: Array<{
+                id: string
+                filename: string
+                mimeType: string
+                size: number
+                path: string
+                previewUrl?: string
+            }>
+            scheduledAt?: number | null
+            deliveryMode?: MessageDeliveryMode
+        }
+    ): Promise<void> {
+        // Pre-queue check (see sendMessage for the in-queue rationale).
+        if (this.historyActionsInFlight.has(sessionId)) {
+            throw new Error('Conversation history action already in progress')
+        }
+        await this.enqueueAutomation(sessionId, async () => {
+            // In-queue check: a history action that started while this entry
+            // waited behind another queue operation must reject the insert,
+            // not race the rollback (same rationale as sendMessage).
+            if (this.historyActionsInFlight.has(sessionId)) {
+                throw new Error('Conversation history action already in progress')
+            }
+            const session = this.sessionCache.getSession(sessionId)
+            if (session?.automationPaused) {
+                throw new AutomationPausedError(sessionId)
+            }
+            const { actualSessionId, createdAt: activeTurnStartedAt } = await this.messageService.sendMessage(sessionId, {
+                ...payload,
+                sentFrom: 'webapp'
+            })
+            this.sessionCache.markMessageQueued(actualSessionId, Date.now(), activeTurnStartedAt)
+            this.sessionCache.recordSessionActivity(actualSessionId, Date.now())
+        })
+    }
+
+    /** Throws when automation is paused for this session. */
+    assertAutomationNotPaused(sessionId: string, sentFrom: string | undefined): void {
+        if (sentFrom === 'telegram-bot') {
+            return
+        }
+        const session = this.sessionCache.getSession(sessionId)
+        if (session?.automationPaused) {
+            throw new AutomationPausedError(sessionId)
+        }
+    }
+
+    /** Pause flag write, ordered against sends via the per-session queue. */
+    async setAutomationPaused(sessionId: string, paused: boolean): Promise<Session | null> {
+        return await this.enqueueAutomation(sessionId, () =>
+            this.sessionCache.setAutomationPaused(sessionId, paused))
+    }
+
+    /**
+     * Human "stop": running-state read, persistent pause, optional abort RPC
+     * and the result all run inside ONE queue entry, so a resume or human
+     * send issued while the abort RPC is in flight stays queued behind it
+     * and cannot overtake the stop. The pause is persisted first; failure
+     * (null) surfaces as an error, never a success result. The abort itself
+     * runs inside the entry (NOT re-enqueued — a nested same-session queue
+     * entry would deadlock) and its errors must propagate.
+     */
+    async stopAutomation(sessionId: string): Promise<SendAutomationResult> {
+        return await this.enqueueAutomation(sessionId, async () => {
+            const pre = this.sessionCache.getSession(sessionId)
+            const wasRunning = Boolean(pre?.active && pre?.thinking)
+
+            const paused = this.sessionCache.setAutomationPaused(sessionId, true)
+            if (!paused) {
+                throw new Error('Failed to persist automation pause')
+            }
+
+            if (wasRunning) {
+                await this.rpcGateway.abortSession(sessionId)
+            }
+            return { automationPaused: true, wasRunning }
+        })
     }
 
     async cancelQueuedMessage(
@@ -1507,7 +1674,9 @@ export class SyncEngine {
                 source.collaborationMode,
                 undefined,
                 undefined,
-                rpcResult.forkSession === true
+                rpcResult.forkSession === true,
+                flavor === 'codex' ? source.metadata?.codexProfile : undefined,
+                flavor === 'codex' ? source.metadata?.codexProvider : undefined
             )
             if (spawn.type !== 'success') {
                 throw new Error(spawn.message)
@@ -1683,6 +1852,90 @@ export class SyncEngine {
             }
         }
         this.handleSessionEnd({ sid: sessionId, time: Date.now() })
+    }
+
+    /**
+     * Change the Codex model provider of an existing session (runtime
+     * switch; port of 3008's changeCodexProvider).
+     *
+     * Flow: validate access (namespace-isolated), require a Codex flavor and
+     * a remote (not human-controlled) session; for an ACTIVE session archive
+     * it first (failure aborts, nothing is persisted), then persist the new
+     * provider via sessionCache.setCodexProvider, then reopen the session and
+     * surface a reopen failure as an error. An INACTIVE session only gets the
+     * config change — this method never spawns a session on its own.
+     *
+     * Empty-string/null provider = Codex default; the cache setter also drops
+     * codexProfile (null explicit-clear sentinel) so the profile cannot
+     * resurrect the old provider on resume.
+     *
+     * Concurrency: one switch per session at a time. A dedicated per-session
+     * tail Map serializes the whole archive→persist→reopen sequence — NOT
+     * historyActionsInFlight (fork/rewind lock) nor the pause queue, because
+     * reopen itself may enqueue on those and nesting would deadlock. A second
+     * concurrent caller is REJECTED with 'Provider switch already in
+     * progress' (never silently de-duplicated: awaiting the winner would
+     * report success for provider B while the row now carries provider A).
+     */
+    async changeCodexProvider(sessionId: string, namespace: string, provider: string | null): Promise<void> {
+        const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) {
+            throw new Error(access.reason === 'access-denied' ? 'Session access denied' : 'Session not found')
+        }
+        const session = access.session
+        if (session.metadata?.flavor !== 'codex') {
+            throw new Error('Provider selection is only supported for Codex sessions')
+        }
+        if (session.agentState?.controlledByUser === true) {
+            throw new Error('Provider selection is only supported for remote sessions')
+        }
+
+        const normalized = provider?.trim() ?? ''
+        const tailKey = `${namespace}:${sessionId}`
+        const existing = this.codexProviderSwitchTails.get(tailKey)
+        if (existing) {
+            throw new Error('Provider switch already in progress')
+        }
+
+        const task = this.changeCodexProviderOnce(sessionId, namespace, normalized)
+        this.codexProviderSwitchTails.set(tailKey, task)
+        try {
+            await task
+        } finally {
+            if (this.codexProviderSwitchTails.get(tailKey) === task) {
+                this.codexProviderSwitchTails.delete(tailKey)
+            }
+        }
+    }
+
+    private async changeCodexProviderOnce(sessionId: string, namespace: string, provider: string): Promise<void> {
+        // Re-resolve under the switch lock: the validation above ran before
+        // serialization, and the winner of a concurrent pair may have changed
+        // the row (archived it) in between.
+        const access = this.sessionCache.resolveSessionAccess(sessionId, namespace)
+        if (!access.ok) {
+            throw new Error(access.reason === 'access-denied' ? 'Session access denied' : 'Session not found')
+        }
+        if (access.session.metadata?.flavor !== 'codex') {
+            throw new Error('Provider selection is only supported for Codex sessions')
+        }
+        if (access.session.agentState?.controlledByUser === true) {
+            throw new Error('Provider selection is only supported for remote sessions')
+        }
+
+        const wasActive = access.session.active
+        if (wasActive) {
+            await this.archiveSession(sessionId)
+        }
+
+        this.sessionCache.setCodexProvider(sessionId, provider)
+
+        if (wasActive) {
+            const result = await this.reopenSession(sessionId, namespace)
+            if (result.type !== 'success') {
+                throw new Error(result.message)
+            }
+        }
     }
 
     /**
@@ -1948,9 +2201,26 @@ export class SyncEngine {
         existingSessionId?: string,
         collaborationMode?: CodexCollaborationMode,
         copilotAgentMode?: CopilotAgentMode,
-        startingMode?: 'remote' | 'pty'
+        startingMode?: 'remote' | 'pty',
+        codexProfile?: string,
+        codexProvider?: string,
+        parentSessionId?: string
     ): ReturnType<RpcGateway['spawnSession']> {
-        return await this.rpcGateway.spawnSession(
+        // Parent-chain validation BEFORE the spawn RPC: the parent must
+        // exist in the same namespace as the target machine (spawn is
+        // machine-scoped, so the machine's namespace IS the child's), must
+        // not be a session the runner is about to reuse, and its ancestor
+        // chain must not loop. Cheap failures cost no RPC round-trip.
+        if (parentSessionId !== undefined) {
+            const machine = this.machineCache.getMachine(machineId)
+            const namespace = machine?.namespace ?? 'default'
+            const parentError = this.validateParentForSpawn(parentSessionId, namespace, existingSessionId)
+            if (parentError) {
+                return parentError
+            }
+        }
+
+        const result = await this.rpcGateway.spawnSession(
             machineId,
             directory,
             agent,
@@ -1966,8 +2236,86 @@ export class SyncEngine {
             existingSessionId,
             collaborationMode,
             copilotAgentMode,
-            startingMode
+            startingMode,
+            undefined,
+            codexProfile,
+            codexProvider,
+            parentSessionId
         )
+
+        // Persist the parent link AFTER a successful spawn, before the caller
+        // sees success. The RPC resolves only once the child CLI has fully
+        // spawned (its hub row exists by then), so setSessionParent targets a
+        // real row. Post-checks: child==parent is impossible for a fresh
+        // UUID child but the reuse path (existingSessionId) was pre-checked;
+        // a stamp failure surfaces as an error — a silently-unlinked child
+        // breaks the parent-child contract.
+        if (parentSessionId !== undefined && result.type === 'success') {
+            if (result.sessionId === parentSessionId) {
+                return { type: 'error', message: 'Parent session cannot be the session itself' }
+            }
+            const namespace = this.machineCache.getMachine(machineId)?.namespace ?? 'default'
+            const stamped = this.store.sessions.setSessionParent(result.sessionId, parentSessionId, namespace)
+            if (!stamped) {
+                return {
+                    type: 'error',
+                    message: 'Spawned but failed to link parent session: child row not found in namespace'
+                }
+            }
+            // Refresh the cache so the very next getSession/summary read
+            // carries the link (no stale in-memory Session between stamp
+            // and first read).
+            this.sessionCache.refreshSession(result.sessionId)
+        }
+        return result
+    }
+
+    /**
+     * Validate a parent link for an about-to-spawn child. Returns a spawn
+     * error result on failure, or null when the link is acceptable:
+     *   - the parent exists and is visible in `namespace` (cross-namespace
+     *     parents are invisible — same 404 surface as every session route),
+     *   - the parent is not the row the runner will reuse (self-reference),
+   *   - the parent's own ancestor chain has no cycle and no repeat id.
+     *
+     * The child id is unknown before the RPC returns, so parent==child is
+     * checked post-spawn in spawnSession's persist step (a fresh UUID child
+     * can never equal the validated parent anyway; the reuse path is covered
+     * by the existingSessionId check here).
+     */
+    private validateParentForSpawn(
+        parentSessionId: string,
+        namespace: string,
+        existingSessionId?: string
+    ): { type: 'error'; message: string } | null {
+        const access = this.sessionCache.resolveSessionAccess(parentSessionId, namespace)
+        if (!access.ok) {
+            return {
+                type: 'error',
+                message: access.reason === 'access-denied'
+                    ? 'Parent session access denied'
+                    : 'Parent session not found'
+            }
+        }
+        if (existingSessionId !== undefined && access.session.id === existingSessionId) {
+            return { type: 'error', message: 'Parent session cannot be the session being spawned' }
+        }
+        // Cycle walk: climb the ancestor chain from the parent; any repeat
+        // (including the parent itself) means a cycle. The chain is
+        // metadata-driven (parentSessionId on the row), so a forged long
+        // chain terminates at the first missing ancestor.
+        const seen = new Set<string>([parentSessionId])
+        let cursor: Session | undefined = access.session
+        while (cursor?.parentSessionId) {
+            const ancestorId = cursor.parentSessionId
+            if (seen.has(ancestorId)) {
+                return { type: 'error', message: 'Parent session chain contains a cycle' }
+            }
+            seen.add(ancestorId)
+            const ancestorAccess = this.sessionCache.resolveSessionAccess(ancestorId, namespace)
+            cursor = ancestorAccess.ok ? ancestorAccess.session : undefined
+        }
+        return null
     }
 
     /**
@@ -2940,6 +3288,8 @@ export class SyncEngine {
             : opts?.permissionMode
                 ?? session.permissionMode
                 ?? metadataPermissionMode
+        const storedCodexProfile = flavor === 'codex' ? metadata.codexProfile : undefined
+        const storedCodexProvider = flavor === 'codex' ? metadata.codexProvider : undefined
         const resumedStartingMode =
             (session.agentState as { startingMode?: 'local' | 'remote' | 'pty' } | null)?.startingMode === 'pty'
                 ? 'pty'
@@ -2984,7 +3334,10 @@ export class SyncEngine {
                 access.sessionId,
                 session.collaborationMode ?? undefined,
                 session.copilotAgentMode ?? undefined,
-                resumedStartingMode
+                resumedStartingMode,
+                undefined,
+                storedCodexProfile,
+                storedCodexProvider
             )
 
             if (spawnResult.type !== 'success') {

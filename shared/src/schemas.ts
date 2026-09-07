@@ -118,9 +118,16 @@ export const MetadataSchema = z.object({
     // Set only after a completed fresh-session clear. The source row remains
     // archived; web clients use this durable link to follow the replacement.
     supersededBySessionId: z.string().optional(),
+    // Parent HAPI session id: set when this session was created by another
+    // HAPI session via the MCP create_session tool (parent→child chain).
+    // Written only by the hub at spawn time; the chain is validated
+    // (same namespace, no self/cycle) before it lands here.
+    parentSessionId: z.string().optional(),
     // Durable in-progress state for runner-backed OpenCode /clear.
     opencodeClearOperation: OpencodeClearOperationSchema.optional(),
     preferredPermissionMode: PermissionModeSchema.optional(),
+    codexProfile: z.string().optional(),
+    codexProvider: z.string().optional(),
     preferredCopilotAgentMode: CopilotAgentModeSchema.optional(),
     flavor: z.string().nullish(),
     // Launch mode, surfaced so the web can show the agent-terminal toggle only
@@ -312,6 +319,8 @@ export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
 export const SessionSchema = z.object({
     id: z.string(),
     namespace: z.string(),
+    /** Durable parent HAPI session for MCP-created child sessions. */
+    parentSessionId: z.string().nullable().optional(),
     seq: z.number(),
     createdAt: z.number(),
     updatedAt: z.number(),
@@ -336,6 +345,11 @@ export const SessionSchema = z.object({
     // full-session payloads and hand-built Session literals stay valid.
     todosUpdatedAt: z.number().optional(),
     teamStateUpdatedAt: z.number().optional(),
+    // Human-interrupt flag, hub-owned: when true, automation-origin sends
+    // (MCP bridge) are server-side rejected until explicitly resumed. Human
+    // (webapp/telegram) sends pass and never implicitly resume. Optional so
+    // older hub payloads without the field stay valid.
+    automationPaused: z.boolean().optional(),
     model: z.string().nullable().optional().default(null),
     modelReasoningEffort: z.string().nullable().optional().default(null),
     effort: z.string().nullable().optional().default(null),
@@ -408,7 +422,12 @@ export const SessionPatchSchema = z.object({
     // signal, not the payload. Keep this minimal: per the operator's 80/20
     // ruling, scratchlist mutations are rare relative to keep-alive
     // patches, so a fresh event type would be overkill.
-    scratchlistUpdatedAt: z.number().optional()
+    scratchlistUpdatedAt: z.number().optional(),
+    // Human-interrupt flag transitions (pause/resume). Server-owned; only
+    // the hub's setAutomationPaused emits it — a CLI metadata/agentState
+    // sparse patch can never carry it, so the flag cannot be cleared by a
+    // client-shaped update.
+    automationPaused: z.boolean().optional()
 }).strict()
 
 export type SessionPatch = z.infer<typeof SessionPatchSchema>

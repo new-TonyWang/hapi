@@ -197,3 +197,121 @@ describe('useSessionActions - setModel', () => {
         expect(invalidate).toHaveBeenCalledWith({ queryKey: ['session', 'session-A'] })
     })
 })
+
+describe('useSessionActions - setCodexProvider', () => {
+    it('posts the provider for codex sessions (empty string restores default)', async () => {
+        const setCodexProvider = vi.fn(async (_sessionId: string, _provider: string) => undefined)
+        const api = { setCodexProvider } as unknown as ApiClient
+
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-codex', 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        await act(async () => {
+            await result.current.setCodexProvider('custom-proxy')
+        })
+
+        expect(setCodexProvider).toHaveBeenCalledWith('session-codex', 'custom-proxy')
+    })
+
+    it('sends an empty string (not undefined) when restoring the default provider', async () => {
+        const setCodexProvider = vi.fn(async () => undefined)
+        const api = { setCodexProvider } as unknown as ApiClient
+
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-codex', 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        await act(async () => {
+            await result.current.setCodexProvider(null)
+        })
+
+        expect(setCodexProvider).toHaveBeenCalledWith('session-codex', '')
+    })
+
+    it('rejects non-codex sessions with a clear error', async () => {
+        const setCodexProvider = vi.fn(async () => undefined)
+        const api = { setCodexProvider } as unknown as ApiClient
+
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-claude', 'claude'),
+            { wrapper: createWrapper() },
+        )
+
+        await expect(result.current.setCodexProvider('custom-proxy')).rejects.toThrow(
+            'Provider selection is only supported for Codex sessions'
+        )
+        expect(setCodexProvider).not.toHaveBeenCalled()
+    })
+
+    it('throws when api or sessionId is missing', async () => {
+        const { result } = renderHook(
+            () => useSessionActions(null, null, 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        await expect(result.current.setCodexProvider('custom-proxy')).rejects.toThrow('Session unavailable')
+    })
+
+    it('surfaces backend errors to the caller (dialog shows them)', async () => {
+        const setCodexProvider = vi.fn(async () => {
+            throw new Error('provider restart failed')
+        })
+        const api = { setCodexProvider } as unknown as ApiClient
+
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-codex', 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        await expect(result.current.setCodexProvider('custom-proxy')).rejects.toThrow('provider restart failed')
+    })
+})
+
+describe('useSessionActions - stopAutomation / resumeAutomation', () => {
+    it('stopAutomation posts the ordered stop (pause persists, then abort)', async () => {
+        const stopAutomation = vi.fn(async () => ({ wasRunning: true }))
+        const api = { stopAutomation } as unknown as ApiClient
+
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-codex', 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        let response: { wasRunning: boolean } | undefined
+        await act(async () => {
+            response = await result.current.stopAutomation()
+        })
+
+        expect(stopAutomation).toHaveBeenCalledWith('session-codex')
+        expect(response).toEqual({ wasRunning: true })
+    })
+
+    it('resumeAutomation posts the explicit resume', async () => {
+        const resumeAutomation = vi.fn(async () => undefined)
+        const api = { resumeAutomation } as unknown as ApiClient
+
+        const { result } = renderHook(
+            () => useSessionActions(api, 'session-codex', 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        await act(async () => {
+            await result.current.resumeAutomation()
+        })
+
+        expect(resumeAutomation).toHaveBeenCalledWith('session-codex')
+    })
+
+    it('both throw when api or sessionId is missing', async () => {
+        const { result } = renderHook(
+            () => useSessionActions(null, null, 'codex'),
+            { wrapper: createWrapper() },
+        )
+
+        await expect(result.current.stopAutomation()).rejects.toThrow('Session unavailable')
+        await expect(result.current.resumeAutomation()).rejects.toThrow('Session unavailable')
+    })
+})

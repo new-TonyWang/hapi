@@ -632,6 +632,14 @@ describe('SyncEngine.clearOpenCodeSession', () => {
                 undefined,
                 undefined,
                 // startingMode — not applicable to an OpenCode clear replacement
+                undefined,
+                // forkSession, codexProfile, codexProvider — OpenCode clear
+                // replacements never fork a hub row or carry Codex launch fields;
+                // the wrapper still forwards the (undefined) slots.
+                undefined,
+                undefined,
+                undefined,
+                // parentSessionId — clear replacements have no parent link.
                 undefined
             )
             expect(engine.getSessionByNamespace(replacementSessionId, 'default')?.metadata).toMatchObject({

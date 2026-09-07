@@ -19,6 +19,10 @@ export type StoredSession = {
     todosUpdatedAt: number | null
     teamState: unknown | null
     teamStateUpdatedAt: number | null
+    /** Human-takeover flag; automation (MCP/scheduling) sends 409 while true. */
+    automationPaused: boolean
+    /** Parent HAPI session id (MCP-created child); null = no parent. */
+    parentSessionId: string | null
     active: boolean
     activeAt: number | null
     seq: number

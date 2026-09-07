@@ -11,6 +11,7 @@ import {
     setSessionEffort,
     setSessionModel,
     setSessionModelReasoningEffort,
+    setSessionAutomationPaused,
     setSessionServiceTier,
     setSessionActive,
     setSessionPinned,
@@ -18,6 +19,8 @@ import {
     type SessionPinMode,
     setSessionTeamState,
     setSessionTodos,
+    getSessionChildren,
+    setSessionParent,
     replaceSessionTodos,
     touchSessionUpdatedAt,
     updateSessionAgentState,
@@ -39,9 +42,20 @@ export class SessionStore {
         model?: string,
         effort?: string,
         modelReasoningEffort?: string,
-        requestedId?: string
+        requestedId?: string,
+        parentSessionId?: string | null
     ): StoredSession {
-        return getOrCreateSession(this.db, tag, metadata, agentState, namespace, model, effort, modelReasoningEffort, requestedId)
+        return getOrCreateSession(this.db, tag, metadata, agentState, namespace, model, effort, modelReasoningEffort, requestedId, parentSessionId)
+    }
+
+    /** Children of a parent, namespace-scoped. See sessions.getSessionChildren. */
+    getSessionChildren(parentSessionId: string, namespace: string): StoredSession[] {
+        return getSessionChildren(this.db, parentSessionId, namespace)
+    }
+
+    /** Set/clear a child's parent link, namespace-guarded. See sessions.setSessionParent. */
+    setSessionParent(id: string, parentSessionId: string | null, namespace: string): StoredSession | null {
+        return setSessionParent(this.db, id, parentSessionId, namespace)
     }
 
     updateSessionMetadata(
@@ -90,6 +104,10 @@ export class SessionStore {
         options?: { touchUpdatedAt?: boolean }
     ): boolean {
         return setSessionModelReasoningEffort(this.db, id, modelReasoningEffort, namespace, options)
+    }
+
+    setSessionAutomationPaused(id: string, paused: boolean, namespace: string): StoredSession | null {
+        return setSessionAutomationPaused(this.db, id, paused, namespace)
     }
 
     setSessionEffort(id: string, effort: string | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {

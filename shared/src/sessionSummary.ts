@@ -43,12 +43,20 @@ export type SessionSummaryMetadata = {
     lifecycleState?: string
     /** Loopback MCP URL when session CLI happy server is running (#956). */
     hapiMcpUrl?: string
+    codexProfile?: string
+    codexProvider?: string
+    /** Parent HAPI session id (MCP-created child sessions). */
+    parentSessionId?: string
 }
 
 export type SessionSummary = {
     id: string
+    /** Durable parent HAPI session for MCP-created child sessions. */
+    parentSessionId?: string | null
     active: boolean
     thinking: boolean
+    /** Human-takeover flag; automation sends 409 while true. Hub-owned. */
+    automationPaused?: boolean
     activeAt: number
     updatedAt: number
     pinned?: boolean
@@ -198,15 +206,20 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
         worktree: metadata.worktree,
         agentSessionId: getSummaryAgentSessionId(metadata),
         lifecycleState: metadata.lifecycleState,
-        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined
+        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined,
+        codexProfile: metadata.codexProfile,
+        codexProvider: metadata.codexProvider,
+        parentSessionId: metadata.parentSessionId
     }
 }
 
 export function toSessionSummary(session: Session): SessionSummary {
     return {
         id: session.id,
+        parentSessionId: session.parentSessionId ?? session.metadata?.parentSessionId ?? null,
         active: session.active,
         thinking: session.thinking,
+        automationPaused: session.automationPaused,
         activeAt: session.activeAt,
         updatedAt: session.updatedAt,
         pinned: session.pinned ?? false,

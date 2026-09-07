@@ -42,7 +42,7 @@ export {
     WorkGraphValidationError
 } from './workGraph'
 
-const SCHEMA_VERSION: number = 26
+const SCHEMA_VERSION: number = 28
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
@@ -348,6 +348,8 @@ export class Store {
             23: () => this.migrateFromV23ToV24(),
             24: () => this.migrateFromV24ToV25(),
             25: () => this.migrateFromV25ToV26(),
+            26: () => this.migrateFromV26ToV27(),
+            27: () => this.migrateFromV27ToV28(),
         })
 
         if (currentVersion === 0) {
@@ -414,6 +416,8 @@ export class Store {
                 todos_updated_at INTEGER,
                 team_state TEXT,
                 team_state_updated_at INTEGER,
+                automation_paused INTEGER NOT NULL DEFAULT 0,
+                parent_session_id TEXT,
                 pinned INTEGER NOT NULL DEFAULT 0,
                 global_pinned INTEGER NOT NULL DEFAULT 0,
                 active INTEGER DEFAULT 0,
@@ -422,6 +426,8 @@ export class Store {
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_tag ON sessions(tag);
             CREATE INDEX IF NOT EXISTS idx_sessions_tag_namespace ON sessions(tag, namespace);
+            CREATE INDEX IF NOT EXISTS idx_sessions_parent
+                ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL;
 
             CREATE TABLE IF NOT EXISTS machines (
                 id TEXT PRIMARY KEY,
@@ -993,6 +999,51 @@ export class Store {
                   AND local_id IS NOT NULL
                   AND scheduled_at IS NULL
                   AND delivery_state = 'queued';
+        `)
+    }
+
+    /**
+     * v26→v27: sessions.automation_paused — durable human-takeover flag for
+     * the automation-pause feature (pause/resume/stop-automation and the
+     * 409 automation_paused contract).
+     *
+     * Self-heal: also back-fills sessions.model_reasoning_effort when the
+     * column is missing. Pre-fork 3010 databases stamped user_version=7
+     * already carry automation_paused (their custom v7 step added it), but
+     * the ladder then starts at step 7, so the official v6→v7 step that
+     * introduces model_reasoning_effort never runs — and every later
+     * INSERT/UPDATE in store/sessions.ts names that column, so first use
+     * fails with "no such column". Guarding both columns keeps the step
+     * idempotent for official v26 databases (reasoning column present,
+     * pause column added) and for already-healed custom v7 databases.
+     */
+    private migrateFromV26ToV27(): void {
+        const columns = this.getSessionColumnNames()
+        if (columns.size === 0) return
+        if (!columns.has('automation_paused')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN automation_paused INTEGER NOT NULL DEFAULT 0')
+        }
+        if (!columns.has('model_reasoning_effort')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN model_reasoning_effort TEXT')
+        }
+    }
+
+    /**
+     * v27→v28: sessions.parent_session_id — durable parent→child chain for
+     * MCP-created child sessions (parent HAPI session id). Nullable TEXT;
+     * NULL (the vast majority) means the session has no parent. The partial
+     * index covers the "find children of X" lookup without indexing the
+     * un-parented tail. Idempotent column guard like every other step.
+     */
+    private migrateFromV27ToV28(): void {
+        const columns = this.getSessionColumnNames()
+        if (columns.size === 0) return
+        if (!columns.has('parent_session_id')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN parent_session_id TEXT')
+        }
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_sessions_parent
+            ON sessions(parent_session_id) WHERE parent_session_id IS NOT NULL
         `)
     }
 

@@ -32,6 +32,7 @@ import {
 } from '@/lib/codexModelCapabilities'
 import { createSerialAsyncQueue } from '@/lib/serialAsyncQueue'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
+import { AutomationPausedBanner } from '@/components/AutomationPausedBanner'
 import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
@@ -1133,7 +1134,9 @@ function SessionChatInner(props: SessionChatProps) {
         setModel,
         setModelReasoningEffort,
         setEffort,
-        setServiceTier
+        setServiceTier,
+        stopAutomation,
+        resumeAutomation
     } = useSessionActions(
         props.api,
         props.session.id,
@@ -1537,11 +1540,33 @@ function SessionChatInner(props: SessionChatProps) {
         }
     }, [setServiceTier, props.onRefresh, haptic])
 
-    // Abort handler
+    // Human stop: hub persists the automation pause first (rejecting
+    // in-flight automation sends), then aborts the running turn — one
+    // ordered call. wasRunning=false means the session was already idle;
+    // the pause still lands and the banner shows.
     const handleAbort = useCallback(async () => {
-        await abortSession()
+        try {
+            await stopAutomation()
+        } catch (e) {
+            haptic.notification('error')
+            console.error('Failed to stop automation:', e)
+        }
         props.onRefresh()
-    }, [abortSession, props.onRefresh])
+    }, [stopAutomation, props.onRefresh, haptic])
+
+    // Explicit resume: clears the human-interrupt flag. No other action
+    // resumes implicitly — the composer keeps posting to /messages and the
+    // hub keeps rejecting automation sends until this runs.
+    const handleResumeAutomation = useCallback(async () => {
+        try {
+            await resumeAutomation()
+            haptic.notification('success')
+        } catch (e) {
+            haptic.notification('error')
+            console.error('Failed to resume automation:', e)
+        }
+        props.onRefresh()
+    }, [resumeAutomation, props.onRefresh, haptic])
 
     // Switch to remote handler
     const handleSwitchToRemote = useCallback(async () => {
@@ -1788,6 +1813,10 @@ function SessionChatInner(props: SessionChatProps) {
                         ? t('session.inactive.autoResume')
                         : t('session.inactive.cannotResume')}
                 </div>
+            ) : null}
+
+            {props.session.automationPaused ? (
+                <AutomationPausedBanner onResume={() => void handleResumeAutomation()} />
             ) : null}
 
             <AssistantRuntimeProvider runtime={runtime}>

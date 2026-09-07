@@ -15,7 +15,7 @@ import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
 import { writeRunnerState, RunnerLocallyPersistedState, readRunnerState, acquireRunnerLock, releaseRunnerLock } from '@/persistence';
 import { getCliArgs } from '@/utils/cliArgs';
 import { getProcessStartMarker, isProcessAlive, isWindows, killProcess, killProcessByChildProcess, killProcessTreeByPid } from '@/utils/process';
-import { PERMISSION_MODES } from '@hapi/protocol/modes';
+import { getPermissionModesForFlavor } from '@hapi/protocol/modes';
 import { RUNNER_CAPABILITIES } from '@hapi/protocol';
 import { withRetry } from '@/utils/time';
 import { isRetryableConnectionError } from '@/utils/errorUtils';
@@ -1568,6 +1568,12 @@ export function buildCliArgs(
   if (options.modelReasoningEffort && (agent === 'codex' || agent === 'opencode')) {
     args.push('--model-reasoning-effort', options.modelReasoningEffort);
   }
+  if (options.codexProfile && agent === 'codex') {
+    args.push('-p', options.codexProfile);
+  }
+  if (options.codexProvider && agent === 'codex') {
+    args.push('--codex-provider', options.codexProvider);
+  }
   if (options.serviceTier && agent === 'codex') {
     args.push('--service-tier', options.serviceTier);
   }
@@ -1580,8 +1586,31 @@ export function buildCliArgs(
   // Pi RPC mode has no permission switching; never pass these flags to it
   // (the Pi parser rejects --permission-mode and ignores --yolo).
   if (agent !== 'pi' && agent !== 'dsh') {
-    if (options.permissionMode && (PERMISSION_MODES as readonly string[]).includes(options.permissionMode)) {
-      args.push('--permission-mode', options.permissionMode);
+    if (options.permissionMode) {
+      // The global enum accepts cross-flavor values, but each flavor's CLI
+      // parser only validates against its own subset (e.g. 'safe-yolo' is
+      // codex-only; claude would crash on it before reaching the hub). Gate
+      // on the flavor's list and pass through only values it accepts.
+      const flavorModes = getPermissionModesForFlavor(agent) as readonly string[];
+      if (flavorModes.includes(options.permissionMode)) {
+        args.push('--permission-mode', options.permissionMode);
+      } else if (flavorModes.length > 0) {
+        // Cross-flavor value: map to the flavor's closest auto-approve mode
+        // instead of crashing the child CLI at parse time.
+        const mapped = flavorModes.includes('yolo')
+          ? 'yolo'
+          : flavorModes.includes('bypassPermissions')
+            ? 'bypassPermissions'
+            : flavorModes.includes('acceptEdits')
+              ? 'acceptEdits'
+              : flavorModes.includes('always-proceed')
+                ? 'always-proceed'
+                : flavorModes[0];
+        args.push('--permission-mode', mapped);
+        logger.debug(
+          `[RUNNER RUN] permissionMode '${options.permissionMode}' not valid for agent '${agent}'; mapped to '${mapped}'`
+        );
+      }
     } else if (yolo) {
       args.push('--yolo');
     }

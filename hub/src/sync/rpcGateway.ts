@@ -187,7 +187,14 @@ export class RpcGateway {
         // Hub session id to reuse for this spawn. When set, the runner boots the
         // CLI with `--hapi-session-id`, so the child reuses the existing hub
         // session row (same id) instead of minting a new one.
-        forkSession?: boolean
+        forkSession?: boolean,
+        codexProfile?: string,
+        codexProvider?: string,
+        // Parent HAPI session id for MCP-created child sessions. The runner
+        // does not interpret it (parent validation/linking is hub-side); it
+        // is forwarded so the CLI can expose it to the child process env if
+        // a future consumer needs it.
+        parentSessionId?: string
     ): Promise<
         | { type: 'success'; sessionId: string }
         | {
@@ -207,6 +214,9 @@ export class RpcGateway {
                     agent,
                     model,
                     modelReasoningEffort,
+                    codexProfile,
+                    codexProvider,
+                    parentSessionId,
                     yolo,
                     sessionType,
                     worktreeName,

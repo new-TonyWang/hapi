@@ -37,6 +37,13 @@ describe('newSessionFormDraft', () => {
             machineId: 'machine-1',
             effort: 'auto',
             modelReasoningEffort: 'default',
+            // PR #1714: loadNewSessionFormDraft normalizes the Codex
+            // profile/provider fields for every preserved agent (they are
+            // persisted in the draft and cleared only when the agent is
+            // coerced). A cursor draft saved without them round-trips as
+            // empty strings — consistent with the NewSession draft tests.
+            codexProfile: '',
+            codexProvider: '',
             serviceTier: 'standard',
             collaborationMode: 'default',
             copilotAgentMode: 'interactive',

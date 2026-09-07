@@ -12,7 +12,7 @@ import { HoverTooltip } from '@/components/HoverTooltip'
 import { safeCopyToClipboard } from '@/lib/clipboard'
 import { buildSessionReferenceText } from '@/lib/sessionReference'
 import { usePlatform } from '@/hooks/usePlatform'
-import { CopyIcon } from '@/components/icons'
+import { CopyIcon, ProviderIcon } from '@/components/icons'
 
 type SessionActionMenuProps = {
     isOpen: boolean
@@ -28,6 +28,8 @@ type SessionActionMenuProps = {
     onMarkUnread?: () => void
     onSyncCodex?: () => void
     onSyncPi?: () => void
+    /** Open the change-provider dialog (Codex sessions only). */
+    onChangeCodexProvider?: () => void
     onArchive: () => void
     onReopen?: () => void
     reopenDisabledReason?: string
@@ -215,6 +217,7 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onMarkUnread,
         onSyncCodex,
         onSyncPi,
+        onChangeCodexProvider,
         onArchive,
         onReopen,
         reopenDisabledReason,
@@ -277,6 +280,11 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
     const handleSyncPi = () => {
         onClose()
         onSyncPi?.()
+    }
+
+    const handleChangeCodexProvider = () => {
+        onClose()
+        onChangeCodexProvider?.()
     }
 
     const handleDelete = () => {
@@ -481,6 +489,18 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                     >
                         <SyncIcon className="text-[var(--app-hint)]" />
                         {t('session.action.syncPi')}
+                    </button>
+                ) : null}
+
+                {onChangeCodexProvider ? (
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
+                        onClick={handleChangeCodexProvider}
+                    >
+                        <ProviderIcon className="h-[18px] w-[18px] text-[var(--app-hint)]" />
+                        {t('session.action.changeProvider')}
                     </button>
                 ) : null}
 

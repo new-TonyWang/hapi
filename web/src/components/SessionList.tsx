@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { isWildcardSearch, matchesSearchQuery } from '@hapi/protocol'
 import type { ApiClient } from '@/api/client'
@@ -62,6 +62,36 @@ type SessionGroup = {
     latestUpdatedAt: number
     hasActiveSession: boolean
     hasPinnedSession: boolean
+}
+
+type NestedSessionSummary = SessionSummary & { parentSessionId?: string | null }
+
+/** Keep a child with the directory group of its highest visible ancestor. */
+export function nestSessionGroups(groups: SessionGroup[]): SessionGroup[] {
+    const sessions = groups.flatMap(group => group.sessions) as NestedSessionSummary[]
+    const sessionById = new Map(sessions.map(session => [session.id, session]))
+    const groupBySessionId = new Map<string, string>()
+    for (const group of groups) {
+        for (const session of group.sessions) groupBySessionId.set(session.id, group.key)
+    }
+    const targetByGroup = new Map<string, SessionSummary[]>()
+    for (const session of sessions) {
+        const visited = new Set<string>()
+        let root = session
+        while (root.parentSessionId && sessionById.has(root.parentSessionId) && !visited.has(root.id)) {
+            visited.add(root.id)
+            root = sessionById.get(root.parentSessionId)!
+        }
+        const targetGroupKey = groupBySessionId.get(root.id) ?? groupBySessionId.get(session.id)
+        if (!targetGroupKey) continue
+        const target = targetByGroup.get(targetGroupKey) ?? []
+        target.push(session)
+        targetByGroup.set(targetGroupKey, target)
+    }
+    return groups.map(group => ({
+        ...group,
+        sessions: targetByGroup.get(group.key) ?? []
+    }))
 }
 
 const RUNNING_BUCKETS = [
@@ -1142,6 +1172,77 @@ function SessionItem(props: {
     )
 }
 
+export function buildNestedSessionChildren(sessions: SessionSummary[]): Map<string | null, SessionSummary[]> {
+    const nested = sessions as NestedSessionSummary[]
+    const knownIds = new Set(nested.map(session => session.id))
+    const map = new Map<string | null, SessionSummary[]>()
+    for (const session of nested) {
+        const parent = session.parentSessionId && knownIds.has(session.parentSessionId)
+            ? session.parentSessionId
+            : null
+        const bucket = map.get(parent) ?? []
+        bucket.push(session)
+        map.set(parent, bucket)
+    }
+    return map
+}
+
+/** Renders the flat API result as a compact, keyboard accessible session tree. */
+function NestedSessionRows(props: {
+    sessions: SessionSummary[]
+    onSelect: (sessionId: string) => void
+    selectedSessionId?: string | null
+    api: ApiClient | null
+    titleSuggestionAvailable: boolean
+    showDetailedStatus: boolean
+    lastSeenVersion: number
+}) {
+    const { t } = useTranslation()
+    const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+    const sessions = props.sessions as NestedSessionSummary[]
+    const byParent = useMemo(() => buildNestedSessionChildren(sessions), [sessions])
+    const childrenById = useMemo(() => new Map(
+        sessions.map(session => [session.id, byParent.get(session.id)?.length ?? 0])
+    ), [sessions, byParent])
+
+    const toggle = (id: string) => setCollapsed(previous => {
+        const next = new Set(previous)
+        if (next.has(id)) next.delete(id)
+        else next.add(id)
+        return next
+    })
+    const render = (parent: string | null, depth: number): React.ReactNode => (byParent.get(parent) ?? []).map((session, index, siblings) => {
+        const childCount = childrenById.get(session.id) ?? 0
+        const isCollapsed = collapsed.has(session.id)
+        const selected = session.id === props.selectedSessionId
+        return (
+            <Fragment key={session.id}>
+            {parent === null && shouldShowPinnedDivider(siblings, index) ? <div className="ml-2.5 mr-2 my-1 border-t border-[var(--app-border)]" aria-hidden="true" /> : null}
+            <div key={session.id} className="relative min-w-0" style={{ marginLeft: depth > 0 ? `${Math.min(depth * 0.85, 2.5)}rem` : undefined }}>
+                {depth > 0 ? <span aria-hidden="true" className="pointer-events-none absolute bottom-0 left-[-0.45rem] top-0 w-px bg-[var(--app-border)]" /> : null}
+                <div className="flex min-w-0 items-center gap-0.5">
+                    {childCount > 0 ? (
+                        <button
+                            type="button"
+                            className="z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                            aria-label={isCollapsed ? t('sessions.children.expand') : t('sessions.children.collapse')}
+                            aria-expanded={!isCollapsed}
+                            onClick={() => toggle(session.id)}
+                        >
+                            <ChevronIcon className="h-3.5 w-3.5" collapsed={isCollapsed} />
+                        </button>
+                    ) : <span className="w-7 shrink-0" aria-hidden="true" />}
+                    <div className="min-w-0 flex-1"><SessionItem session={session} onSelect={props.onSelect} api={props.api} titleSuggestionAvailable={props.titleSuggestionAvailable} selected={selected} showDetailedStatus={props.showDetailedStatus} lastSeenVersion={props.lastSeenVersion} /></div>
+                    {childCount > 0 ? <span className="mr-1 shrink-0 rounded-full bg-[var(--app-secondary-bg)] px-1.5 py-0.5 text-[10px] tabular-nums text-[var(--app-hint)]" aria-label={t('sessions.children.count', { count: childCount })}>{childCount}</span> : null}
+                </div>
+                {!isCollapsed ? render(session.id, depth + 1) : null}
+            </div>
+            </Fragment>
+        )
+    })
+    return <div className="flex min-w-0 flex-col gap-0.5">{render(null, 0)}</div>
+}
+
 type PullToRefreshState = 'idle' | 'pulling' | 'ready'
 
 const PULL_REFRESH_FEEDBACK_PX = 16
@@ -1352,13 +1453,13 @@ export function SessionList(props: {
         + runningSessions.pending.length
     const activeSessionTotal = runningSessions.active.length
     const groups = useMemo(
-        () => groupSessionsByDirectory(
+        () => nestSessionGroups(groupSessionsByDirectory(
             machineFilteredSessions.filter((session) => {
                 if (session.globalPinned) return false
                 if (pinInProgressSessions && !session.pinned && isPinnedInProgressSession(session)) return false
                 return true
             })
-        ),
+        )),
         [machineFilteredSessions, pinInProgressSessions]
     )
     // Directory groups whose rows all floated to the pinned sections still
@@ -1377,7 +1478,7 @@ export function SessionList(props: {
             return []
         }
         const visibleKeys = new Set(groups.map((group) => group.key))
-        return allDirectoryGroups.filter((group) => !visibleKeys.has(group.key))
+        return allDirectoryGroups.filter((group) => !visibleKeys.has(group.key) && group.sessions.length > 0)
     }, [groups, allDirectoryGroups, pinInProgressSessions])
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
@@ -1647,26 +1748,15 @@ export function SessionList(props: {
                 <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
                     <div className="collapsible-inner">
                     <div className="flex flex-col gap-0.5 ml-3 pl-1 py-1">
-                        {visibleGroupSessions.map((s, index) => (
-                            <div key={s.id} className="contents">
-                                {shouldShowPinnedDivider(visibleGroupSessions, index) ? (
-                                    <div
-                                        className="ml-2.5 mr-2 my-1 border-t border-[var(--app-border)]"
-                                        aria-hidden="true"
-                                    />
-                                ) : null}
-                                <SessionItem
-                                    session={s}
-                                    onSelect={props.onSelect}
-                                    showPath={false}
-                                    api={api}
-                                    titleSuggestionAvailable={titleSuggestionAvailable}
-                                    selected={s.id === selectedSessionId}
-                                    showDetailedStatus={showDetailedStatus}
-                                    lastSeenVersion={lastSeenVersion}
-                                />
-                            </div>
-                        ))}
+                        <NestedSessionRows
+                            sessions={visibleGroupSessions}
+                            onSelect={props.onSelect}
+                            selectedSessionId={selectedSessionId}
+                            api={api}
+                            titleSuggestionAvailable={titleSuggestionAvailable}
+                            showDetailedStatus={showDetailedStatus}
+                            lastSeenVersion={lastSeenVersion}
+                        />
                         {group.sessions.length > sessionPreviewLimit && (hiddenSessionCount > 0 || canShowFewerSessions) ? (
                             <div className="ml-2.5 mr-2 my-1 flex gap-1.5">
                                 {canShowFewerSessions ? (

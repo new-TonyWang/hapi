@@ -36,6 +36,8 @@ import {
     copyMessagesToSession as copyStoredMessagesToSession,
     getAllMessages,
     getMessagesAfterSeq,
+    getMessagesAfterSeqLimit,
+    getMessagesLastBySeqLimit,
     getMessageSeqById,
     truncateMessagesFromLocalId,
     type CancelQueuedMessageResult,
@@ -84,6 +86,16 @@ export class MessageStore {
 
     getMessagesAfterSeq(sessionId: string, afterSeq: number): StoredMessage[] {
         return getMessagesAfterSeq(this.db, sessionId, afterSeq)
+    }
+
+    /** Bounded automation-output cursor (MCP bridge); see messages.ts. */
+    getMessagesAfterSeqLimit(sessionId: string, afterSeq: number, limit: number): StoredMessage[] {
+        return getMessagesAfterSeqLimit(this.db, sessionId, afterSeq, limit)
+    }
+
+    /** Bounded automation-output tail (MCP bridge); see messages.ts. */
+    getMessagesLastBySeqLimit(sessionId: string, limit: number): StoredMessage[] {
+        return getMessagesLastBySeqLimit(this.db, sessionId, limit)
     }
 
     getSeqById(sessionId: string, messageId: string): number | null {

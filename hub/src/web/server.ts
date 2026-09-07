@@ -19,6 +19,8 @@ import { createBindRoutes } from './routes/bind'
 import { createEventsRoutes } from './routes/events'
 import { createSessionsRoutes } from './routes/sessions'
 import { createMessagesRoutes } from './routes/messages'
+import { createAutomationOutputRoutes } from './routes/automationOutput'
+import { createCodexProviderRoutes } from './routes/codexProvider'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
@@ -288,6 +290,8 @@ function createWebApp(options: {
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
+    app.route('/api', createAutomationOutputRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
+    app.route('/api', createCodexProviderRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))

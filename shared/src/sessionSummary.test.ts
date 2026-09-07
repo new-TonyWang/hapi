@@ -76,6 +76,12 @@ describe('toSessionSummary', () => {
         expect(toSessionSummary(makeSession()).globalPinned).toBe(false)
     })
 
+    it('carries the automation pause state and stays undefined when absent', () => {
+        expect(toSessionSummary(makeSession({ automationPaused: true })).automationPaused).toBe(true)
+        expect(toSessionSummary(makeSession({ automationPaused: false })).automationPaused).toBe(false)
+        expect(toSessionSummary(makeSession()).automationPaused).toBeUndefined()
+    })
+
     it('uses grokSessionId as the native resume token', () => {
         const summary = toSessionSummary(makeSession({
             metadata: {
@@ -196,6 +202,21 @@ describe('toSessionSummary', () => {
         }))
 
         expect(summary.metadata?.hapiMcpUrl).toBe('http://127.0.0.1:42133/')
+    })
+
+    it('includes Codex profile and provider in summary metadata', () => {
+        const summary = toSessionSummary(makeSession({
+            metadata: {
+                path: '/proj',
+                host: 'local',
+                flavor: 'codex',
+                codexProfile: 'work',
+                codexProvider: 'custom-proxy'
+            }
+        }))
+
+        expect(summary.metadata?.codexProfile).toBe('work')
+        expect(summary.metadata?.codexProvider).toBe('custom-proxy')
     })
 
     it('includes structured pendingRequests for hover-tooltip copy', () => {

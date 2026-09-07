@@ -81,6 +81,14 @@ export function isIndeterminateError(error: unknown): boolean {
 
 type CodexAppServerClientOptions = {
     cwd?: string;
+    /**
+     * Codex profile/provider are applied through the app-server JSON-RPC
+     * `config` / `modelProvider` fields on thread/start/resume/fork (see
+     * buildThreadStartParams + codexProfileConfig). They must NOT become
+     * process argv: `codex -p <name> app-server` is rejected by upstream
+     * Codex ("--profile only applies to runtime commands"), and
+     * `-c profile=...` is a deprecated legacy selector.
+     */
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -213,7 +221,8 @@ export class CodexAppServerClient extends JsonLineParser {
 
         const codexCommand = resolveCodexAppServerCommand();
         logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
-        const child = spawn(codexCommand, ['app-server'], {
+        const args = ['app-server'];
+        const child = spawn(codexCommand, args, {
             cwd: this.options.cwd,
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];

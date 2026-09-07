@@ -5,9 +5,20 @@ type IconProps = {
 }
 
 function createIcon(paths: ReactNode, props: IconProps, strokeWidth = 1.5) {
+    // Always keep a size constraint: a className with only color/util classes
+    // must not leave the svg unconstrained (it would render at the viewBox's
+    // natural size and blow up layouts — see the oversized provider icon in
+    // SessionActionMenu). When the caller already passes h-*/w-* classes, the
+    // default is skipped (no conflicting duplicates).
+    const hasSizeClass = typeof props.className === 'string' && /\bh-\S+|\bw-\S+/.test(props.className)
+    const className = hasSizeClass
+        ? props.className
+        : props.className
+            ? `h-4 w-4 ${props.className}`
+            : 'h-4 w-4'
     return (
         <svg
-            className={props.className ?? 'h-4 w-4'}
+            className={className}
             viewBox="0 0 24 24"
             fill="none"
             stroke="currentColor"
@@ -50,6 +61,21 @@ export function CopyIcon(props: IconProps) {
         </>,
         props,
         2
+    )
+}
+
+export function ProviderIcon(props: IconProps) {
+    return createIcon(
+        <>
+            <path d="M12 3v2" />
+            <path d="M12 19v2" />
+            <path d="M4.2 4.2l1.4 1.4" />
+            <path d="M18.4 18.4l1.4 1.4" />
+            <path d="M3 12h2" />
+            <path d="M19 12h2" />
+            <circle cx="12" cy="12" r="4" />
+        </>,
+        props
     )
 }
 

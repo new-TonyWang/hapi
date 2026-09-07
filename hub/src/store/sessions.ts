@@ -53,6 +53,8 @@ const PARSE_IDENTITY_FIELDS = ['path', 'host'] as const
 
 const ROUTING_FIELDS = ['flavor', 'machineId'] as const
 
+const CODEX_LAUNCH_FIELDS = ['codexProfile', 'codexProvider'] as const
+
 const SIMPLE_RESUME_TOKENS = [
     'claudeSessionId',
     'codexSessionId',
@@ -127,6 +129,7 @@ export function mergeSessionMetadata(prior: unknown, next: unknown): unknown {
     let merged: Record<string, unknown> | null = null
     merged = carryForwardIfMissing(prior, next, merged, PARSE_IDENTITY_FIELDS)
     merged = carryForwardIfMissing(prior, next, merged, ROUTING_FIELDS)
+    merged = carryForwardIfMissing(prior, next, merged, CODEX_LAUNCH_FIELDS)
     merged = carryForwardIfMissing(prior, next, merged, SIMPLE_RESUME_TOKENS)
     merged = preserveCursorProtocolPair(prior, next, merged)
     return merged ?? next
@@ -153,6 +156,8 @@ type DbSessionRow = {
     todos_updated_at: number | null
     team_state: string | null
     team_state_updated_at: number | null
+    automation_paused: number
+    parent_session_id: string | null
     active: number
     active_at: number | null
     seq: number
@@ -180,6 +185,8 @@ function toStoredSession(row: DbSessionRow): StoredSession {
         todosUpdatedAt: row.todos_updated_at,
         teamState: safeJsonParse(row.team_state),
         teamStateUpdatedAt: row.team_state_updated_at,
+        automationPaused: row.automation_paused === 1,
+        parentSessionId: row.parent_session_id,
         active: row.active === 1,
         activeAt: row.active_at,
         seq: row.seq
@@ -195,7 +202,8 @@ export function getOrCreateSession(
     model?: string,
     effort?: string,
     modelReasoningEffort?: string,
-    requestedId?: string
+    requestedId?: string,
+    parentSessionId?: string | null
 ): StoredSession {
     const existing = db.prepare(
         'SELECT * FROM sessions WHERE tag = ? AND namespace = ? ORDER BY created_at DESC LIMIT 1'
@@ -233,6 +241,8 @@ export function getOrCreateSession(
             model_reasoning_effort,
             effort,
             todos, todos_updated_at,
+            automation_paused,
+            parent_session_id,
             active, active_at, seq
         ) VALUES (
             @id, @tag, @namespace, NULL, @created_at, @updated_at,
@@ -242,6 +252,8 @@ export function getOrCreateSession(
             @model_reasoning_effort,
             @effort,
             NULL, NULL,
+            0,
+            @parent_session_id,
             0, @active_at, 0
         )
     `).run({
@@ -257,7 +269,8 @@ export function getOrCreateSession(
         agent_state: agentStateJson,
         model: model ?? null,
         model_reasoning_effort: modelReasoningEffort ?? null,
-        effort: effort ?? null
+        effort: effort ?? null,
+        parent_session_id: parentSessionId ?? null
     })
 
     const row = getSession(db, id)
@@ -272,6 +285,53 @@ export class SessionIdentityConflictError extends Error {
         super(message)
         this.name = 'SessionIdentityConflictError'
     }
+}
+
+/**
+ * List the children of a parent session, ordered oldest-first (created_at,
+ * then id for a stable order). The namespace guard is the WHERE clause
+ * itself: only rows whose own namespace matches the caller's namespace are
+ * visible, so a cross-namespace parent id can never leak another tenant's
+ * children. Returns [] when the parent has no children.
+ */
+export function getSessionChildren(
+    db: Database,
+    parentSessionId: string,
+    namespace: string
+): StoredSession[] {
+    const rows = db.prepare(`
+        SELECT * FROM sessions
+        WHERE parent_session_id = ? AND namespace = ?
+        ORDER BY created_at ASC, id ASC
+    `).all(parentSessionId, namespace) as DbSessionRow[]
+    return rows.map(toStoredSession)
+}
+
+/**
+ * Set/clear a session's parent link. The child row's namespace is matched in
+ * the UPDATE so the write can never land on another namespace's row; returns
+ * the updated row or null when the child id does not exist in this namespace.
+ * A null parentSessionId clears the link (back to "no parent").
+ */
+export function setSessionParent(
+    db: Database,
+    sessionId: string,
+    parentSessionId: string | null,
+    namespace: string
+): StoredSession | null {
+    const result = db.prepare(`
+        UPDATE sessions
+        SET parent_session_id = @parent_session_id
+        WHERE id = @id AND namespace = @namespace
+    `).run({
+        parent_session_id: parentSessionId,
+        id: sessionId,
+        namespace
+    })
+    if (result.changes === 0) {
+        return null
+    }
+    return getSession(db, sessionId)
 }
 
 export function updateSessionMetadata(
@@ -455,6 +515,37 @@ export function setSessionTeamState(
     } catch {
         return false
     }
+}
+
+/**
+ * Toggle the human-takeover flag on a session. Idempotent. Returns the
+ * updated session, or null when the session does not exist in this
+ * namespace (no rows matched, so nothing was written).
+ */
+export function setSessionAutomationPaused(db: Database, id: string, paused: boolean, namespace: string): StoredSession | null {
+    try {
+        const result = db.prepare(`
+            UPDATE sessions
+            SET automation_paused = @automation_paused,
+                updated_at = @updated_at,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
+        `).run({
+            id,
+            namespace,
+            automation_paused: paused ? 1 : 0,
+            updated_at: Date.now()
+        })
+
+        if (result.changes === 0) {
+            return null
+        }
+    } catch {
+        return null
+    }
+
+    return getSession(db, id)
 }
 
 export function setSessionModel(
@@ -693,6 +784,14 @@ export function getSessionsByNamespace(db: Database, namespace: string): StoredS
 }
 
 export function deleteSession(db: Database, id: string, namespace: string): boolean {
+    // Detach children first: a dangling parent_session_id would otherwise make
+    // the UI jump an orphaned child from its parent's directory group to the
+    // child's own path group when the parent disappears. Clearing the link
+    // keeps the child a stable standalone session (grouped by its own path,
+    // same as before the parent ever existed in the UI's nesting view).
+    db.prepare(
+        'UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ? AND namespace = ?'
+    ).run(id, namespace)
     const result = db.prepare(
         'DELETE FROM sessions WHERE id = ? AND namespace = ?'
     ).run(id, namespace)

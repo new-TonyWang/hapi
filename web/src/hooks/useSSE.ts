@@ -535,7 +535,12 @@ export function useSSE(options: {
                     modelReasoningEffort: Object.prototype.hasOwnProperty.call(patch, 'modelReasoningEffort')
                         ? patch.modelReasoningEffort ?? null
                         : current.modelReasoningEffort,
-                    effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
+                    effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort,
+                    // Human-interrupt flag: present-means-set, `false` clears
+                    // the paused indicator, `undefined` leaves it untouched.
+                    automationPaused: Object.prototype.hasOwnProperty.call(patch, 'automationPaused')
+                        ? patch.automationPaused ?? false
+                        : current.automationPaused
                 }
 
                 // Gate versioned fields against THIS summary's watermarks —
