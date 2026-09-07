@@ -23,6 +23,10 @@ export interface McpServerEntry {
     command: string;
     args: string[];
     tools?: Record<string, McpServerToolConfig>;
+    /** Extra env vars for the MCP server subprocess. Codex scrubs env for MCP
+     * children, so anything the server needs (e.g. HAPI_SESSION_ID) must be
+     * passed explicitly here. */
+    env?: Record<string, string>;
 }
 
 /**

@@ -84,10 +84,6 @@ export async function runMcpControlBridge(argv: string[]): Promise<void> {
     try {
         const flags = parseArgs(argv)
         const { url, token } = await resolveCredentials(flags)
-        const parsedUrl = new URL(url)
-        if (parsedUrl.port !== '3010') {
-            throw new Error('hapi-control MCP is restricted to the 3010 Hub')
-        }
         const parentSessionId = process.env.HAPI_SESSION_ID?.trim()
         if (!parentSessionId) {
             throw new Error('hapi-control MCP must run inside an existing HAPI session (HAPI_SESSION_ID missing)')
