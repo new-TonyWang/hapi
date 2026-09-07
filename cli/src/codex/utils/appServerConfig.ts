@@ -232,29 +232,6 @@ export function buildThreadStartParams(args: {
     const resolvedSandbox = cliOverrides?.sandbox ?? sandbox;
 
     const config = buildMcpServerConfig(args.mcpServers);
-    // Inject env for the user-configured mcp-control bridge (config.toml's
-    // [mcp_servers.hapi-control]). Codex scrubs env for MCP server subprocesses,
-    // so the bridge cannot read HAPI_SESSION_ID / HAPI_API_URL from its process
-    // ancestry — pass them through the thread config instead. A partial server
-    // entry (env only) merges with the config.toml definition; command and
-    // tool approval settings there stay authoritative. This routes each
-    // session's control bridge to the hub that spawned it.
-    const mcpControlEnv: Record<string, string> = {};
-    if (process.env.HAPI_SESSION_ID) {
-        mcpControlEnv.HAPI_SESSION_ID = process.env.HAPI_SESSION_ID;
-    }
-    if (process.env.HAPI_API_URL) {
-        mcpControlEnv.HAPI_API_URL = process.env.HAPI_API_URL;
-    }
-    if (Object.keys(mcpControlEnv).length > 0) {
-        config['mcp_servers.hapi-control'] = {
-            ...(config['mcp_servers.hapi-control'] as Record<string, unknown> | undefined),
-            env: {
-                ...((config['mcp_servers.hapi-control'] as Record<string, unknown> | undefined)?.env as Record<string, string> | undefined),
-                ...mcpControlEnv
-            }
-        };
-    }
     const {
         baseInstructions,
         developerInstructions: resolvedDeveloperInstructions

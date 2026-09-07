@@ -1,6 +1,13 @@
 /**
  * HAPI MCP server
- * Provides HAPI CLI specific tools including chat session title management
+ * Provides HAPI CLI specific tools including chat session title management,
+ * peer collaboration, and (merged in from the former standalone mcp-control
+ * bridge) the session-control tools: create_session / send_message /
+ * get_session / read_messages / interrupt_session / pause_automation /
+ * resume_automation / list_machines / list_codex_options /
+ * change_codex_provider / set_permission_mode. One MCP server per session
+ * for every agent flavor — sessions no longer need a separate
+ * hapi-control entry in codex config.toml.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -9,6 +16,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { AddressInfo } from "node:net";
 import { z } from "zod";
 import { logger } from "@/ui/logger";
+import { configuration } from "@/configuration";
 import { ApiSessionClient } from "@/api/apiSession";
 import { randomUUID } from "node:crypto";
 import {
@@ -27,6 +35,8 @@ import {
     SESSION_ID_PREFIX_PARAM_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation'
 import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
+import { HubApiBridge } from "@/mcpControl/hubApiClient";
+import { registerControlTools, type ParentSessionDefaults } from "@/mcpControl/controlMcpServer";
 
 type StartHappyServerOptions = {
     emitTitleSummary?: boolean;
@@ -35,6 +45,9 @@ type StartHappyServerOptions = {
         workingDirectory: string;
         flavor: string;
     };
+    /** Register the merged-in session-control tools (create_session etc).
+     * Defaults to true; tests of the lightweight tools pass false. */
+    enableControlTools?: boolean;
 };
 
 /** Registered on the MCP server, but never pre-approved via Claude --allowedTools. */
@@ -57,12 +70,56 @@ export function toClaudeAllowedHapiMcpTools(toolNames: string[]): string[] {
         .map((toolName) => `mcp__hapi__${toolName}`);
 }
 
-function createHapiMcpServer(
+/**
+ * Register the merged-in mcp-control tools on the in-session hapi MCP server.
+ * The bridge talks REST to the hub this session belongs to (same hub URL and
+ * token the CLI already resolved), so control actions always target the hub
+ * that spawned the session — no per-host routing needed. Defaults for
+ * create_session inherit from this session (machine/directory/flavor/model/
+ * codex profile+provider/permission mode) via a best-effort hub lookup.
+ *
+ * Resolved before registration (not fire-and-forget) so tools/list never
+ * observes a half-registered server: a client connecting right after the
+ * handshake would otherwise race the defaults lookup and miss the control
+ * tools entirely.
+ */
+async function registerSessionControlTools(client: ApiSessionClient, mcp: McpServer): Promise<void> {
+    const hubUrl = configuration.apiUrl;
+    const hubToken = configuration.cliApiToken;
+    if (!hubUrl || !hubToken) {
+        logger.debug('[hapiMCP] session-control tools disabled: no hub URL/token configured');
+        return;
+    }
+    const bridge = new HubApiBridge({ baseUrl: hubUrl, accessToken: hubToken });
+    const parentSessionId = client.sessionId;
+
+    // Best-effort parent defaults; the tools degrade gracefully (require
+    // explicit machineId/directory) when the lookup fails.
+    let defaults: ParentSessionDefaults | undefined;
+    try {
+        const session = await bridge.getSession(parentSessionId);
+        defaults = {
+            machineId: session.machineId,
+            directory: session.path,
+            flavor: session.flavor,
+            model: session.model,
+            codexProfile: session.codexProfile,
+            codexProvider: session.codexProvider,
+            permissionMode: session.permissionMode
+        };
+    } catch (error) {
+        logger.debug('[hapiMCP] parent defaults unavailable; control tools require explicit args', error);
+    }
+    registerControlTools(mcp, bridge, parentSessionId, defaults);
+}
+
+async function createHapiMcpServer(
     client: ApiSessionClient,
     emitTitleSummary: boolean,
     enableChangeTitle: boolean,
-    skillLookup: StartHappyServerOptions['skillLookup']
-): McpServer {
+    skillLookup: StartHappyServerOptions['skillLookup'],
+    enableControlTools: boolean
+): Promise<McpServer> {
     const handler = async (title: string) => {
         logger.debug('[hapiMCP] Changing title to:', title);
         try {
@@ -458,6 +515,12 @@ function createHapiMcpServer(
         });
     }
 
+    if (enableControlTools) {
+        // Awaits the defaults lookup so the returned server is fully
+        // registered before any client can list tools (no half-registered
+        // window).
+        await registerSessionControlTools(client, mcp);
+    }
     return mcp;
 }
 
@@ -475,11 +538,12 @@ function readMcpSessionId(req: IncomingMessage): string | undefined {
 export async function startHappyServer(client: ApiSessionClient, options: StartHappyServerOptions = {}) {
     const emitTitleSummary = options.emitTitleSummary ?? true;
     const enableChangeTitle = options.enableChangeTitle ?? true;
+    const enableControlTools = options.enableControlTools ?? true;
     const transports = new Map<string, StreamableHTTPServerTransport>();
     const mcps = new Map<string, McpServer>();
 
-    const createMcpTransport = () => {
-        const mcp = createHapiMcpServer(client, emitTitleSummary, enableChangeTitle, options.skillLookup);
+    const createMcpTransport = async () => {
+        const mcp = await createHapiMcpServer(client, emitTitleSummary, enableChangeTitle, options.skillLookup, enableControlTools);
         const transport = new StreamableHTTPServerTransport({
             sessionIdGenerator: () => randomUUID(),
             onsessioninitialized: (sessionId) => {
@@ -502,7 +566,7 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
             const sessionId = readMcpSessionId(req);
             const transport = sessionId
                 ? transports.get(sessionId)
-                : createMcpTransport();
+                : await createMcpTransport();
 
             if (!transport) {
                 if (!res.headersSent) {
@@ -538,6 +602,17 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
         : ['display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer'];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
+    }
+    if (enableControlTools) {
+        // Merged-in session-control tools (formerly the standalone
+        // mcp-control bridge). The stdio forwarding bridge filters by this
+        // list, so they must be advertised for codex sessions to see them.
+        toolNames.push(
+            'create_session', 'send_message', 'get_session', 'read_messages',
+            'interrupt_session', 'pause_automation', 'resume_automation',
+            'list_machines', 'list_codex_options', 'change_codex_provider',
+            'set_permission_mode'
+        );
     }
 
     return {

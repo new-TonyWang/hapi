@@ -293,6 +293,61 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
       name: z.string().trim().min(1).max(128).describe('Exact skill name shown by HAPI skill autocomplete'),
     });
 
+    // Session-control tools (create_session etc., merged into the hapi MCP
+    // server): forward transparently. Their input schemas and descriptions
+    // are fetched from the upstream HTTP MCP server at startup so this bridge
+    // stays a pure proxy and never drifts from the real definitions.
+    const CONTROL_TOOL_NAMES = [
+        'create_session', 'send_message', 'get_session', 'read_messages',
+        'interrupt_session', 'pause_automation', 'resume_automation',
+        'list_machines', 'list_codex_options', 'change_codex_provider',
+        'set_permission_mode'
+    ];
+    const controlTools = CONTROL_TOOL_NAMES.filter((name) => toolNames.has(name));
+    if (controlTools.length > 0) {
+        try {
+            const client = await ensureHttpClient();
+            const upstream = await client.listTools();
+            const byName = new Map(upstream.tools.map((tool: { name: string }) => [tool.name, tool]));
+            // zod-compatible passthrough schema: the upstream HTTP server owns
+            // validation (its tools were registered with the real zod
+            // schemas); this bridge forwards arguments verbatim. The tool
+            // description carries the argument documentation from upstream.
+            const passthroughSchema = z.object({}).passthrough() as unknown as z.ZodTypeAny;
+            for (const name of controlTools) {
+                const upstreamTool = byName.get(name) as {
+                    name: string;
+                    description?: string;
+                    title?: string;
+                } | undefined;
+                if (!upstreamTool) continue;
+                server.registerTool<any, any>(
+                    name,
+                    {
+                        description: upstreamTool.description ?? name,
+                        title: upstreamTool.title,
+                        inputSchema: passthroughSchema,
+                    },
+                    async (args: Record<string, unknown>) => {
+                        try {
+                            const response = await client.callTool({ name, arguments: args });
+                            return response as any;
+                        } catch (error) {
+                            return {
+                                content: [
+                                    { type: 'text' as const, text: `Failed to ${name}: ${error instanceof Error ? error.message : String(error)}` },
+                                ],
+                                isError: true,
+                            };
+                        }
+                    }
+                );
+            }
+        } catch (error) {
+            process.stderr.write(`[hapi-mcp-bridge] control tools unavailable: ${error instanceof Error ? error.message : String(error)}\n`);
+        }
+    }
+
     if (toolNames.has('skill_lookup')) {
       server.registerTool<any, any>(
         'skill_lookup',

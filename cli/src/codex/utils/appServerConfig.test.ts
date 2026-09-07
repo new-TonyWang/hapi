@@ -23,37 +23,6 @@ describe('appServerConfig', () => {
         return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}`;
     };
 
-    it('injects mcp-control env from process env into thread config', () => {
-        process.env.HAPI_SESSION_ID = 'sess-env-test';
-        process.env.HAPI_API_URL = 'http://127.0.0.1:3008';
-        try {
-            const params = buildThreadStartParams({
-                cwd: '/workspace/project',
-                mode: { permissionMode: 'default', collaborationMode: 'default' },
-                mcpServers
-            });
-            const config = params.config as Record<string, unknown>;
-            const control = config['mcp_servers.hapi-control'] as { env?: Record<string, string> };
-            expect(control.env).toEqual({
-                HAPI_SESSION_ID: 'sess-env-test',
-                HAPI_API_URL: 'http://127.0.0.1:3008'
-            });
-        } finally {
-            delete process.env.HAPI_SESSION_ID;
-            delete process.env.HAPI_API_URL;
-        }
-    });
-
-    it('omits mcp-control env injection when session env vars are absent', () => {
-        const params = buildThreadStartParams({
-            cwd: '/workspace/project',
-            mode: { permissionMode: 'default', collaborationMode: 'default' },
-            mcpServers
-        });
-        const config = params.config as Record<string, unknown>;
-        expect(config).not.toHaveProperty('mcp_servers.hapi-control');
-    });
-
     it('preserves Codex built-in base instructions by omitting the default override', () => {
         const params = buildThreadStartParams({
             cwd: '/workspace/project',

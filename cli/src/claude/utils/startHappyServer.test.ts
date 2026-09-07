@@ -21,6 +21,12 @@ describe('startHappyServer skill_lookup', () => {
     let sendAgentMessage: ReturnType<typeof vi.fn>
 
     beforeEach(async () => {
+        // These tests cover the lightweight tools only; the merged-in
+        // session-control tools activate when a hub URL+token is configured.
+        // The test runner may execute inside a hapi session that exports them,
+        // so strip for determinism.
+        delete process.env.CLI_API_TOKEN
+        delete process.env.HAPI_API_URL
         sandboxDir = await mkdtemp(join(tmpdir(), 'hapi-skill-mcp-'))
         workingDirectory = join(sandboxDir, 'repo')
         process.env.HOME = join(sandboxDir, 'home')
@@ -50,12 +56,13 @@ describe('startHappyServer skill_lookup', () => {
         } as unknown as ApiSessionClient
         const server = await startHappyServer(sessionClient, enableSkillLookup
             ? {
+                enableControlTools: false,
                 skillLookup: {
                     workingDirectory,
                     flavor: 'opencode'
                 }
             }
-            : {})
+            : { enableControlTools: false })
         stopServer = server.stop
 
         client = new Client(
@@ -174,7 +181,7 @@ describe('startHappyServer skill_lookup', () => {
             sendAgentMessage: vi.fn(),
             sendClaudeSessionMessage: vi.fn()
         } as unknown as ApiSessionClient
-        const server = await startHappyServer(sessionClient, { enableChangeTitle: false })
+        const server = await startHappyServer(sessionClient, { enableChangeTitle: false, enableControlTools: false })
         stopServer = server.stop
         const mcp = new Client({ name: 'hapi-test', version: '1.0.0' })
         client = mcp

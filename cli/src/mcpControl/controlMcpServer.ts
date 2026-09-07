@@ -103,13 +103,21 @@ export type ParentSessionDefaults = {
     permissionMode: string | null
 }
 
-/** Build the MCP server wired to a HubApiBridge. Transport attached by caller. */
-export function createControlMcpServer(bridge: HubApiBridge, parentSessionId?: string, defaults?: ParentSessionDefaults): McpServer {
-    const server = new McpServer({
-        name: 'hapi-control',
-        version: '1.0.0'
-    })
-
+/**
+ * Register the mcp-control tools (create_session, send_message, get_session,
+ * read_messages, interrupt_session, pause/resume_automation,
+ * list_machines, list_codex_options, change_codex_provider,
+ * set_permission_mode) onto an existing McpServer instance. Shared by the
+ * standalone stdio bridge (createControlMcpServer) and the in-session hapi
+ * MCP bridge (startHappyServer), so every flavor's session sees one unified
+ * "hapi" MCP server instead of two separate ones.
+ */
+export function registerControlTools(
+    server: McpServer,
+    bridge: HubApiBridge,
+    parentSessionId?: string,
+    defaults?: ParentSessionDefaults
+): void {
     server.registerTool<any, any>(
         'create_session',
         {
@@ -386,6 +394,15 @@ export function createControlMcpServer(bridge: HubApiBridge, parentSessionId?: s
         }
     )
 
+}
+
+/** Build the standalone MCP server wired to a HubApiBridge. Transport attached by caller. */
+export function createControlMcpServer(bridge: HubApiBridge, parentSessionId?: string, defaults?: ParentSessionDefaults): McpServer {
+    const server = new McpServer({
+        name: 'hapi-control',
+        version: '1.0.0'
+    })
+    registerControlTools(server, bridge, parentSessionId, defaults)
     return server
 }
 
