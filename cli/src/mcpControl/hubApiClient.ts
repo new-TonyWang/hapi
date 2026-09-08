@@ -327,12 +327,13 @@ export class HubApiBridge {
      * (GET /api/machines/:id/codex-models). Names only — credentials never
      * leave the runner; this response carries no secrets.
      */
-    async listCodexOptions(machineId: string): Promise<{ profiles: string[]; providers: string[] }> {
-        const result = await this.requestJson<{ profiles?: unknown; providers?: unknown }>(
+    async listCodexOptions(machineId: string): Promise<{ models: string[]; profiles: string[]; providers: string[] }> {
+        const result = await this.requestJson<{ models?: unknown; profiles?: unknown; providers?: unknown }>(
             'GET',
             `/api/machines/${encodeURIComponent(machineId)}/codex-models`
         )
         return {
+            models: toModelIdArray(result.models),
             profiles: toStringArray(result.profiles),
             providers: toStringArray(result.providers)
         }
@@ -462,6 +463,17 @@ function toMessageInfo(raw: Record<string, unknown>): HubMessageInfo {
         text: extracted.text,
         createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : 0
     }
+}
+
+function toModelIdArray(value: unknown): string[] {
+    if (!Array.isArray(value)) return []
+    return value
+        .map((entry) => {
+            if (!entry || typeof entry !== 'object') return null
+            const id = (entry as Record<string, unknown>).id ?? (entry as Record<string, unknown>).model
+            return typeof id === 'string' ? id : null
+        })
+        .filter((entry): entry is string => entry !== null)
 }
 
 function toStringArray(value: unknown): string[] {

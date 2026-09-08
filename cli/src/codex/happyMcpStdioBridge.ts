@@ -309,16 +309,50 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
             const client = await ensureHttpClient();
             const upstream = await client.listTools();
             const byName = new Map(upstream.tools.map((tool: { name: string }) => [tool.name, tool]));
-            // zod-compatible passthrough schema: the upstream HTTP server owns
-            // validation (its tools were registered with the real zod
-            // schemas); this bridge forwards arguments verbatim. The tool
-            // description carries the argument documentation from upstream.
-            const passthroughSchema = z.object({}).passthrough() as unknown as z.ZodTypeAny;
+            // Convert each upstream JSON Schema to a zod shape so codex sees
+            // the real parameter names/types/descriptions (an opaque
+            // passthrough schema hides the arguments from the model, which
+            // then calls tools without required params). Upstream still owns
+            // authoritative validation; this is for client-side visibility.
+            const jsonSchemaToZod = (schema: unknown): z.ZodTypeAny => {
+                if (!schema || typeof schema !== 'object') return z.any();
+                const record = schema as Record<string, unknown>;
+                if (record.type === 'object' && record.properties && typeof record.properties === 'object') {
+                    const shape: Record<string, z.ZodTypeAny> = {};
+                    const required = new Set(Array.isArray(record.required) ? record.required as string[] : []);
+                    for (const [key, prop] of Object.entries(record.properties as Record<string, unknown>)) {
+                        let field = jsonSchemaToZod(prop);
+                        const propRecord = prop && typeof prop === 'object' ? prop as Record<string, unknown> : {};
+                        if (typeof propRecord.description === 'string' && field instanceof z.ZodType) {
+                            field = field.describe(propRecord.description);
+                        }
+                        if (!required.has(key)) {
+                            field = field.optional();
+                        }
+                        shape[key] = field;
+                    }
+                    const objectSchema = z.object(shape);
+                    return record.additionalProperties === false ? objectSchema.strict() : objectSchema.passthrough();
+                }
+                if (Array.isArray(record.enum)) {
+                    const values = record.enum.filter((v): v is string => typeof v === 'string');
+                    return values.length > 0 ? z.enum(values as [string, ...string[]]) : z.string();
+                }
+                switch (record.type) {
+                    case 'string': return z.string();
+                    case 'number':
+                    case 'integer': return z.number();
+                    case 'boolean': return z.boolean();
+                    case 'array': return z.array(jsonSchemaToZod(record.items));
+                    default: return z.any();
+                }
+            };
             for (const name of controlTools) {
                 const upstreamTool = byName.get(name) as {
                     name: string;
                     description?: string;
                     title?: string;
+                    inputSchema?: unknown;
                 } | undefined;
                 if (!upstreamTool) continue;
                 server.registerTool<any, any>(
@@ -326,7 +360,7 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
                     {
                         description: upstreamTool.description ?? name,
                         title: upstreamTool.title,
-                        inputSchema: passthroughSchema,
+                        inputSchema: jsonSchemaToZod(upstreamTool.inputSchema),
                     },
                     async (args: Record<string, unknown>) => {
                         try {

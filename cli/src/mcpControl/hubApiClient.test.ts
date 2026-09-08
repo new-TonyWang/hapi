@@ -105,6 +105,10 @@ describe('HubApiBridge', () => {
                 match: (url, method) => method === 'GET' && url.endsWith('/api/machines/mac-1/codex-models'),
                 respond: () => jsonResponse({
                     success: true,
+                    models: [
+                        { id: 'gpt-5.5', displayName: 'GPT-5.5' },
+                        { id: 'kimi-k3', displayName: 'Kimi K3' }
+                    ],
                     profiles: ['xubao', 'default'],
                     providers: ['closeai', 'tokenmax', 'xubao']
                 })
@@ -424,6 +428,7 @@ describe('HubApiBridge', () => {
 
             expect(calls.some(c => c.method === 'GET' && c.url.endsWith('/api/machines/mac-1/codex-models'))).toBe(true)
             expect(options).toEqual({
+                models: ['gpt-5.5', 'kimi-k3'],
                 profiles: ['xubao', 'default'],
                 providers: ['closeai', 'tokenmax', 'xubao']
             })
@@ -434,7 +439,7 @@ describe('HubApiBridge', () => {
 
             const options = await bridge.listCodexOptions('mac-2')
 
-            expect(options).toEqual({ profiles: [], providers: [] })
+            expect(options).toEqual({ models: [], profiles: [], providers: [] })
         })
 
         it('throws hub error with status on failure', async () => {

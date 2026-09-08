@@ -342,13 +342,20 @@ export function registerControlTools(
         'list_codex_options',
         {
             title: 'List Codex Options',
-            description: 'List Codex profiles and providers configured on a machine. Names only; credentials stay on the runner. Output: "profiles:" then "providers:" lines, one name per line. Use these names for create_session codexProfile/codexProvider and change_codex_provider.',
+            description: 'List Codex models, profiles, and providers configured on a machine. Names only; credentials stay on the runner. Output: "models:", "profiles:", then "providers:" lines, one name per line. Model ids (e.g. kimi-k3, z-ai/glm-5.3) feed create_session model; provider names feed create_session codexProvider / change_codex_provider.',
             inputSchema: listCodexOptionsSchema
         },
         async (args: { machineId: string }) => {
             try {
-                const { profiles, providers } = await bridge.listCodexOptions(args.machineId)
-                const lines = ['profiles:', ...profiles.map((name) => `  ${name}`), 'providers:', ...providers.map((name) => `  ${name}`)]
+                const { models, profiles, providers } = await bridge.listCodexOptions(args.machineId)
+                const lines = [
+                    'models:',
+                    ...models.map((name) => `  ${name}`),
+                    'profiles:',
+                    ...profiles.map((name) => `  ${name}`),
+                    'providers:',
+                    ...providers.map((name) => `  ${name}`)
+                ]
                 return textResult(lines.join('\n'))
             } catch (error) {
                 return textResult(`Failed to list codex options: ${errorMessage(error)}`, true)

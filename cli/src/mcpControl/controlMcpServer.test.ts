@@ -613,7 +613,7 @@ describe('controlMcpServer tools', () => {
         const { client, connect, fetchMock } = setup([
             authRoute,
             (url, method) => method === 'GET' && url.endsWith('/api/machines/mac-1/codex-models')
-                ? json({ success: true, profiles: ['xubao', 'default'], providers: ['closeai', 'tokenmax', 'xubao'] })
+                ? json({ success: true, models: [{ id: 'gpt-5.5' }, { id: 'kimi-k3' }], profiles: ['xubao', 'default'], providers: ['closeai', 'tokenmax', 'xubao'] })
                 : null
         ])
         await connect()
@@ -622,7 +622,7 @@ describe('controlMcpServer tools', () => {
 
         expect((result as { isError?: boolean }).isError).toBeFalsy()
         expect(textOf(result as never)).toBe(
-            'profiles:\n  xubao\n  default\nproviders:\n  closeai\n  tokenmax\n  xubao'
+            'models:\n  gpt-5.5\n  kimi-k3\nprofiles:\n  xubao\n  default\nproviders:\n  closeai\n  tokenmax\n  xubao'
         )
         // Names only: response body never serialized into tool output, and the
         // only machine-scoped request is the codex-models GET itself
@@ -644,7 +644,7 @@ describe('controlMcpServer tools', () => {
         const result = await client.callTool({ name: 'list_codex_options', arguments: { machineId: 'mac-1' } })
 
         expect((result as { isError?: boolean }).isError).toBeFalsy()
-        expect(textOf(result as never)).toBe('profiles:\nproviders:')
+        expect(textOf(result as never)).toBe('models:\nprofiles:\nproviders:')
     })
 
     it('list_codex_options surfaces hub errors', async () => {
